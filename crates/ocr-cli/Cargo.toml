@@ -1,0 +1,18 @@
+[package]
+name = "ocr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ocr-tool command line interface"
+
+[[bin]]
+name = "ocr-tool"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+ctrlc = "3"
+ocr-core = { path = "../ocr-core" }
+ocr-app = { path = "../ocr-app" }

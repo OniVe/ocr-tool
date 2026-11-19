@@ -1,0 +1,59 @@
+ocr-tool — third-party notices
+================================
+
+This repository contains MIT-licensed Rust source code. It does not contain
+model weights, llama.cpp binaries or PDFium binaries. Those are downloaded
+separately by the user.
+
+1. Chandra OCR 2 model weights
+------------------------------
+Source: https://github.com/datalab-to/chandra
+Weights: https://huggingface.co/datalab-to/chandra-ocr-2
+Community GGUF quantization: https://huggingface.co/mradermacher/chandra-ocr-2-GGUF
+License: OpenRAIL-M (see the model card and the LICENSE file in the model repository).
+
+The weights are NOT bundled with ocr-tool. OpenRAIL-M includes use restrictions;
+downloading or using the weights means accepting those terms. No commercial-use
+or fitness-for-purpose guarantee is made by this project. Output of an OCR model
+can be wrong; review important documents.
+
+2. llama.cpp
+------------
+Source: https://github.com/ggml-org/llama.cpp
+Pinned build: b12535
+License: MIT
+
+The `llama-server` executable and its DLLs/shared libraries are downloaded by
+`scripts/fetch-runtime.*` or must be supplied by the user. They are not part of
+this repository's source license.
+
+3. PDFium / pdfium-binaries
+---------------------------
+PDFium: https://pdfium.googlesource.com/pdfium/
+Prebuilt binaries: https://github.com/bblanchon/pdfium-binaries
+Pinned build: chromium/8165 (PDFium 160.0.8165.0)
+License: BSD-3-Clause (plus third-party licenses inside the PDFium distribution)
+
+The PDFium dynamic library is downloaded separately and is not bundled in this
+repository.
+
+4. GGUF community quantization
+------------------------------
+The Q4_K_M file used by default is a community quantization by mradermacher of
+the official Chandra OCR 2 weights. Quantization can reduce accuracy compared to
+BF16. Verify the SHA-256 printed by `ocr-tool models download` (pinned in
+`crates/ocr-app/src/download.rs`).
+
+5. Rust crates
+--------------
+The Rust dependencies retain their own licenses (MIT, Apache-2.0, BSD, Zlib,
+Unicode-3.0, etc.). Run `cargo metadata` / `cargo deny` for a complete audit.
+Notable dependencies: eframe/egui (MIT/Apache-2.0), pdfium-render (MIT/Apache-2.0),
+ammonia (MIT), htmd (MIT), image (MIT/Apache-2.0), ureq (MIT/Apache-2.0),
+clap (MIT/Apache-2.0), rfd (MIT).
+
+6. Test samples
+---------------
+Files under `samples/` (except SOURCES.md) are public web documents used for
+local testing only; they contain personal data and are excluded from version
+control. They are not redistributed with ocr-tool.

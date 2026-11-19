@@ -1,0 +1,15 @@
+[package]
+name = "ocr-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PDFium-backed PDF page renderer for ocr-tool"
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+pdfium-render.workspace = true
+ocr-core = { path = "../ocr-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

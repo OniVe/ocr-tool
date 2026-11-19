@@ -1,0 +1,17 @@
+[package]
+name = "ocr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types, prompt, HTML/Markdown handling and naming for ocr-tool"
+
+[dependencies]
+ammonia.workspace = true
+htmd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

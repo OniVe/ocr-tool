@@ -1,0 +1,19 @@
+[package]
+name = "ocr-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop GUI for ocr-tool"
+
+[[bin]]
+name = "ocr-tool-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+eframe = "0.31"
+egui = "0.31"
+rfd = "0.15"
+open = "5"
+ocr-core = { path = "../ocr-core" }
+ocr-app = { path = "../ocr-app" }

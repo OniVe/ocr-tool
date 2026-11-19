@@ -1,0 +1,25 @@
+# Build output
+/target/
+/out/
+/dist/
+/ocr-output/
+
+# Local runtime, binaries and model weights (never commit these)
+/runtime/
+/.tmp/
+*.gguf
+*.part
+
+# Local test documents contain personal data; keep only provenance notes
+/samples/*
+!/samples/SOURCES.md
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
