@@ -32,8 +32,14 @@ pub enum ProgressEvent {
     },
     PageStarted {
         path: String,
+        /// 1-based page number inside the document.
         page: u32,
+        /// Total pages of the document (not only the selected ones).
         total_pages: u32,
+        /// 1-based position in the selected page list.
+        selected_index: u32,
+        /// Number of selected pages.
+        selected_total: u32,
     },
     PageFinished {
         path: String,

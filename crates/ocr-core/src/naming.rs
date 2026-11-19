@@ -58,9 +58,32 @@ pub fn sanitize_stem(stem: &str) -> String {
     let out = out.trim().trim_end_matches('.').trim();
     if out.is_empty() {
         "output".to_string()
+    } else if is_windows_reserved(out) {
+        // `CON.md`, `NUL.html` and friends cannot be created on Windows. The
+        // underscore must go into the device-name part: `CON.txt_` is still
+        // treated as the CON device.
+        match out.split_once('.') {
+            Some((base, rest)) => format!("{}_.{}", base.trim_end(), rest),
+            None => format!("{out}_"),
+        }
     } else {
         out.to_string()
     }
+}
+
+/// Windows treats these names (including any extension, e.g. `CON.txt`) as
+/// devices, so they can never be used as a file stem.
+fn is_windows_reserved(stem: &str) -> bool {
+    let base = stem.split('.').next().unwrap_or(stem).trim_end();
+    let upper = base.to_ascii_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let bytes = upper.as_bytes();
+    bytes.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && bytes[3].is_ascii_digit()
+        && bytes[3] != b'0'
 }
 
 pub fn stem_of(path: &Path) -> String {
@@ -112,5 +135,18 @@ mod tests {
         assert_eq!(sanitize_stem("a:b/c*d?"), "a_b_c_d_");
         assert_eq!(sanitize_stem("  ...  "), "output");
         assert_eq!(sanitize_stem("Счет № 99"), "Счет № 99");
+    }
+
+    #[test]
+    fn windows_reserved_device_names_get_a_suffix() {
+        for name in ["CON", "con", "Prn", "AUX", "NUL", "COM1", "lpt9"] {
+            let stem = sanitize_stem(name);
+            assert!(stem.ends_with('_'), "{name} -> {stem}");
+        }
+        assert_eq!(sanitize_stem("CON"), "CON_");
+        assert_eq!(sanitize_stem("CON.txt"), "CON_.txt");
+        assert_eq!(sanitize_stem("COM0"), "COM0");
+        assert_eq!(sanitize_stem("console"), "console");
+        assert_eq!(sanitize_stem("COM10"), "COM10");
     }
 }

@@ -94,7 +94,57 @@ $doctorText = & $Exe doctor --llama-dir $LlamaGpu --model-dir $ModelDir 2>&1 | O
 Check "doctor prints model components" ($doctorText -match "model dir:" -and $doctorText -match "mmproj")
 Check "doctor prints pdfium" ($doctorText -match "pdfium" -and $doctorText -match "OK")
 Check "doctor prints llama-server" ($doctorText -match "llama-server candidates" -and $doctorText -match "gpu")
+Check "doctor prints llama version" ($doctorText -match "version:")
+Check "doctor prints pdfium version" ($doctorText -match "\[version ")
 Write-Host $doctorText
+
+$doctorJson = & $Exe doctor --llama-dir $LlamaGpu --model-dir $ModelDir --json 2>&1 | Out-String
+$doctorReport = $doctorJson | ConvertFrom-Json
+Check "doctor JSON has version fields" (($null -ne $doctorReport.pdfium.version) -and ($null -ne $doctorReport.llama_candidates[0].version))
+
+# ---------------------------------------------------------------- exit codes
+Write-Host "`n== error exit codes =="
+$badOut = Join-Path $OutRoot "errors"
+$code = Invoke-Ocr @("ocr", $Jpg, "-o", $badOut, "--pages", "0") (Join-Path $OutRoot "pages0.log")
+Check "malformed --pages exits 2" ($code -eq 2) "exit $code"
+
+$isoDir = Join-Path $OutRoot "iso"
+New-Item -ItemType Directory -Force -Path $isoDir | Out-Null
+Copy-Item $Exe (Join-Path $isoDir "ocr-tool.exe") -Force
+$brokenDir = Join-Path $isoDir "broken-llama"
+New-Item -ItemType Directory -Force -Path $brokenDir | Out-Null
+Copy-Item (Join-Path $LlamaGpu "llama-server.exe") (Join-Path $brokenDir "llama-server.exe") -Force
+Push-Location $isoDir
+try {
+    $code = Invoke-Ocr @(
+        "ocr", $Jpg, "-o", (Join-Path $isoDir "out"), "--device", "gpu",
+        "--llama-dir", $brokenDir, "--model-dir", $ModelDir
+    ) (Join-Path $isoDir "broken.log")
+} finally {
+    Pop-Location
+}
+Check "broken engine exits 3" ($code -eq 3) "exit $code"
+
+# ---------------------------------------------------------------- dist layout
+Write-Host "`n== dist-like layout (exe-relative runtime discovery) =="
+$dist = Join-Path $OutRoot "dist"
+$distRuntime = Join-Path $dist "runtime/windows-x64"
+New-Item -ItemType Directory -Force -Path $distRuntime | Out-Null
+Copy-Item $Exe (Join-Path $dist "ocr-tool.exe") -Force
+Copy-Item -Recurse $LlamaGpu (Join-Path $distRuntime "llama-vulkan")
+Copy-Item -Recurse $LlamaCpu (Join-Path $distRuntime "llama-cpu")
+New-Item -ItemType Directory -Force -Path (Join-Path $distRuntime "pdfium/bin") | Out-Null
+Copy-Item $Pdfium (Join-Path $distRuntime "pdfium/bin/pdfium.dll") -Force
+$savedPdfium = $env:OCR_PDFIUM
+Remove-Item Env:\OCR_PDFIUM -ErrorAction SilentlyContinue
+try {
+    $distDoctor = & (Join-Path $dist "ocr-tool.exe") doctor --model-dir $ModelDir 2>&1 | Out-String
+} finally {
+    $env:OCR_PDFIUM = $savedPdfium
+}
+Check "dist layout finds bundled llama and pdfium" (
+    $distDoctor -match "llama-server candidates" -and $distDoctor -match "\[OK\s+\] pdfium"
+) $distDoctor
 
 # ---------------------------------------------------------------- GPU JPG
 Write-Host "`n== GPU: invoice_scan_ru.jpg =="
@@ -118,6 +168,20 @@ Assert-FileContains $html 'charset="utf-8"' "HTML declares UTF-8"
 Assert-FileContains $html "Дедморозим" "HTML contains Russian text"
 Check "JPG _meta.json exists" (Test-Path (Join-Path $jpgOut "_meta.json"))
 Write-Host ("GPU JPG wall time: {0:N1} s" -f $sw.Elapsed.TotalSeconds)
+
+# ---------------------------------------------------------------- collision + meta merge
+Write-Host "`n== collision and _meta.json merge in one output directory =="
+$copySrc = Join-Path $OutRoot "copy-src"
+New-Item -ItemType Directory -Force -Path $copySrc | Out-Null
+Copy-Item $Jpg (Join-Path $copySrc "invoice_scan_ru.jpg") -Force
+$code = Invoke-Ocr @(
+    "ocr", (Join-Path $copySrc "invoice_scan_ru.jpg"), "-o", $jpgOut, "--format", "md",
+    "--device", "gpu", "--llama-dir", $LlamaGpu, "--model-dir", $ModelDir
+) (Join-Path $OutRoot "collision.log")
+Check "second job exits 0" ($code -eq 0) "exit $code; see $OutRoot/collision.log"
+Check "collision writes invoice_scan_ru-2.md" (Test-Path (Join-Path $jpgOut "invoice_scan_ru-2.md"))
+$jobMeta = Get-Content (Join-Path $jpgOut "_meta.json") -Raw | ConvertFrom-Json
+Check "_meta.json keeps documents of both jobs" ($jobMeta.documents.Count -ge 2) "documents=$($jobMeta.documents.Count)"
 
 # ---------------------------------------------------------------- GPU PDF
 Write-Host "`n== GPU: contract_ru.pdf pages 1-2 =="
@@ -200,6 +264,10 @@ if (-not $SkipGui) {
 }
 
 Write-Host "`n============================================"
+$leftover = @(Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and $_.Path.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+})
+Check "no llama-server sidecar left after the run" ($leftover.Count -eq 0) "pids: $($leftover.Id -join ',')"
 if ($script:Failures -eq 0) {
     Write-Host "ACCEPTANCE PASSED ($script:Checks checks)" -ForegroundColor Green
     exit 0

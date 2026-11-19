@@ -299,6 +299,18 @@ mod tests {
     }
 
     #[test]
+    fn sanitizer_keeps_table_layout_and_drops_embedded_scripts() {
+        let dirty = r#"<table border="1"><tr><td colspan="2" onclick="x()">A<script>alert(1)</script></td></tr></table><iframe src="https://evil"></iframe><style>p{}</style>"#;
+        let clean = sanitize_fragment(dirty);
+        assert!(clean.contains("<table"), "{clean}");
+        assert!(clean.contains("colspan=\"2\""), "{clean}");
+        assert!(!clean.contains("script"), "{clean}");
+        assert!(!clean.contains("iframe"), "{clean}");
+        assert!(!clean.contains("onclick"), "{clean}");
+        assert!(!clean.contains("<style"), "{clean}");
+    }
+
+    #[test]
     fn html_document_is_utf8_russian_and_has_page_sections() {
         let html = render_html_document(
             "Счет <99>",

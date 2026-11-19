@@ -1,15 +1,18 @@
 use anyhow::{bail, Result};
 
-/// Parse a 1-based page selection such as `1-5,7,10-12` into a sorted, unique
-/// list of zero-based page indices clamped to `total`.
-///
-/// An empty specification means "all pages".
-pub fn parse_page_selection(spec: Option<&str>, total: usize) -> Result<Vec<usize>> {
-    let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok((0..total).collect());
-    };
+/// Parse the syntax of a 1-based page selection without knowing the document
+/// length. Used by preflight so that `--pages 0` is a configuration error
+/// (exit code 2) rather than a processing failure (exit code 3).
+pub fn validate_page_spec(spec: &str) -> Result<()> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(());
+    }
+    parse_ranges(spec).map(|_| ())
+}
 
-    let mut selected = Vec::new();
+fn parse_ranges(spec: &str) -> Result<Vec<(usize, usize)>> {
+    let mut ranges = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();
         if part.is_empty() {
@@ -32,6 +35,22 @@ pub fn parse_page_selection(spec: Option<&str>, total: usize) -> Result<Vec<usiz
         if start > end {
             bail!("invalid page range '{part}': start is greater than end");
         }
+        ranges.push((start, end));
+    }
+    Ok(ranges)
+}
+
+/// Parse a 1-based page selection such as `1-5,7,10-12` into a sorted, unique
+/// list of zero-based page indices clamped to `total`.
+///
+/// An empty specification means "all pages".
+pub fn parse_page_selection(spec: Option<&str>, total: usize) -> Result<Vec<usize>> {
+    let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((0..total).collect());
+    };
+
+    let mut selected = Vec::new();
+    for (start, end) in parse_ranges(spec)? {
         if start > total {
             bail!("page {start} is out of range (document has {total} pages)");
         }
@@ -74,6 +93,18 @@ mod tests {
     #[test]
     fn end_is_clamped_to_document_length() {
         assert_eq!(parse_page_selection(Some("2-99"), 3).unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn spec_validation_rejects_zero_before_the_job_runs() {
+        assert!(validate_page_spec("0").is_err());
+        assert!(validate_page_spec("1-0").is_err());
+        assert!(validate_page_spec("3-1").is_err());
+        assert!(validate_page_spec("1,,2").is_err());
+        assert!(validate_page_spec("a").is_err());
+        assert!(validate_page_spec("").is_ok());
+        // Out-of-document ranges are only known per document, not here.
+        assert!(validate_page_spec("9-99").is_ok());
     }
 
     #[test]

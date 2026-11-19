@@ -32,6 +32,34 @@ enum Msg {
     Done(Result<JobReport, String>),
 }
 
+/// Sends `Msg::Done` when the worker disappears, including a panic unwind that
+/// never reaches the normal send. Without it the UI would stay in `running`.
+struct DoneGuard {
+    tx: Sender<Msg>,
+    sent: bool,
+}
+
+impl DoneGuard {
+    fn new(tx: Sender<Msg>) -> Self {
+        Self { tx, sent: false }
+    }
+
+    fn finish(&mut self, result: Result<JobReport, String>) {
+        let _ = self.tx.send(Msg::Done(result));
+        self.sent = true;
+    }
+}
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.tx.send(Msg::Done(Err(
+                "worker thread panicked before reporting a result".to_string(),
+            )));
+        }
+    }
+}
+
 struct OcrApp {
     inputs: Vec<PathBuf>,
     output_dir: String,
@@ -39,6 +67,7 @@ struct OcrApp {
     device: Device,
     dpi: u32,
     pages: String,
+    password: String,
     recursive: bool,
     model_dir: String,
     llama_dir: String,
@@ -65,6 +94,7 @@ impl OcrApp {
             device: Device::Auto,
             dpi: 192,
             pages: String::new(),
+            password: String::new(),
             recursive: false,
             model_dir: String::new(),
             llama_dir: String::new(),
@@ -117,6 +147,11 @@ impl OcrApp {
             } else {
                 Some(self.pages.trim().to_string())
             },
+            password: if self.password.trim().is_empty() {
+                None
+            } else {
+                Some(self.password.trim().to_string())
+            },
             recursive: self.recursive,
             model_dir: non_empty_path(&self.model_dir),
             llama_dir: non_empty_path(&self.llama_dir),
@@ -135,21 +170,42 @@ impl OcrApp {
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
+            let mut guard = DoneGuard::new(tx.clone());
             let mut emit = |event: ProgressEvent| {
                 let _ = tx.send(Msg::Event(event));
             };
             let result =
                 run_job(&options, &cancel, &mut emit).map_err(|error| format!("{error:#}"));
-            let _ = tx.send(Msg::Done(result));
+            guard.finish(result);
         });
     }
 
     fn poll(&mut self) {
-        let messages: Vec<Msg> = match &self.rx {
-            Some(rx) => rx.try_iter().collect(),
-            None => return,
-        };
-        for message in messages {
+        loop {
+            let message = match &self.rx {
+                Some(rx) => match rx.try_recv() {
+                    Ok(message) => message,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // The worker vanished without Msg::Done (panic before the
+                        // DoneGuard existed, or a dropped sender): leave the
+                        // `running` state instead of spinning forever.
+                        if self.running {
+                            self.running = false;
+                            self.cancelling = false;
+                            self.status = "Worker stopped unexpectedly. See the log.".to_string();
+                            self.log(
+                                "error: worker thread exited without reporting a result"
+                                    .to_string(),
+                                true,
+                            );
+                        }
+                        self.rx = None;
+                        break;
+                    }
+                },
+                None => return,
+            };
             match message {
                 Msg::Event(event) => self.handle_event(event),
                 Msg::Done(result) => {
@@ -186,6 +242,7 @@ impl OcrApp {
                         }
                     }
                     self.rx = None;
+                    return;
                 }
             }
         }
@@ -207,9 +264,19 @@ impl OcrApp {
                 self.log(format!("[{index}/{total}] {path}"), false);
             }
             ProgressEvent::PageStarted {
-                page, total_pages, ..
+                page,
+                total_pages,
+                selected_index,
+                selected_total,
+                ..
             } => {
-                self.status = format!("Page {page}/{total_pages}: recognizing...");
+                self.status = if selected_total != total_pages {
+                    format!(
+                        "Page {page}/{total_pages} (selected {selected_index}/{selected_total}): recognizing..."
+                    )
+                } else {
+                    format!("Page {page}/{total_pages}: recognizing...")
+                };
                 let base = self.progress;
                 let fraction = if total_pages > 0 {
                     (page.saturating_sub(1)) as f32 / total_pages as f32
@@ -380,6 +447,15 @@ impl OcrApp {
                 });
                 ui.label("Options");
                 ui.checkbox(&mut self.recursive, "Recurse into subfolders");
+                ui.end_row();
+
+                ui.label("PDF password");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .hint_text("optional; never logged")
+                        .desired_width(240.0),
+                );
                 ui.end_row();
             });
 
@@ -553,11 +629,68 @@ impl eframe::App for OcrApp {
     }
 }
 
+impl Drop for OcrApp {
+    /// Closing the window must stop the sidecar before the process exits. The
+    /// Windows job object would kill it anyway; this also covers a normal exit
+    /// where the worker is waiting on a long HTTP request.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(rx) = self.rx.take() {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(left) {
+                    Ok(Msg::Done(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break
+                    }
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                }
+            }
+        }
+    }
+}
+
 fn non_empty_path(value: &str) -> Option<PathBuf> {
     let value = value.trim();
     if value.is_empty() {
         None
     } else {
         Some(PathBuf::from(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn done_guard_reports_a_panicking_worker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = DoneGuard::new(tx.clone());
+            panic!("boom");
+        }));
+        assert!(result.is_err());
+        match rx.try_recv() {
+            Ok(Msg::Done(Err(message))) => assert!(message.contains("panicked"), "{message}"),
+            Ok(Msg::Done(Ok(_))) => panic!("unexpected success"),
+            Ok(Msg::Event(_)) => panic!("unexpected event"),
+            Err(error) => panic!("no Done message: {error}"),
+        }
+    }
+
+    #[test]
+    fn done_guard_does_not_duplicate_done() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut guard = DoneGuard::new(tx);
+            guard.finish(Err("real error".to_string()));
+        }
+        assert!(matches!(rx.try_recv(), Ok(Msg::Done(Err(_)))));
+        assert!(rx.try_recv().is_err(), "exactly one Done message");
     }
 }

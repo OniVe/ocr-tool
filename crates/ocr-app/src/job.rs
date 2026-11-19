@@ -7,8 +7,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
 use ocr_core::{
     clean_model_html, discover_model_paths, model_dir_source, now_rfc3339, parse_page_selection,
-    render_html_document, render_markdown_document, resolve_model_dir, stem_of, DocumentMeta,
-    JobMeta, ModelPaths, OutputAllocator, OutputFormat, ProgressEvent, MODEL_ENV,
+    render_html_document, render_markdown_document, resolve_model_dir, stem_of, validate_page_spec,
+    DocumentMeta, JobMeta, ModelPaths, OutputAllocator, OutputFormat, ProgressEvent, MODEL_ENV,
 };
 use ocr_engine::{inspect_candidates, EngineConfig, OcrServer};
 use ocr_pdf::{PdfRenderer, RenderOptions, DEFAULT_DPI};
@@ -16,6 +16,7 @@ use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::device_name;
+use crate::download::check_model_sizes;
 
 #[derive(Debug, Clone)]
 pub struct JobOptions {
@@ -25,6 +26,7 @@ pub struct JobOptions {
     pub device: ocr_core::Device,
     pub dpi: u32,
     pub pages: Option<String>,
+    pub password: Option<String>,
     pub recursive: bool,
     pub model_dir: Option<PathBuf>,
     pub llama_dir: Option<PathBuf>,
@@ -42,6 +44,7 @@ impl Default for JobOptions {
             device: ocr_core::Device::Auto,
             dpi: DEFAULT_DPI,
             pages: None,
+            password: None,
             recursive: false,
             model_dir: None,
             llama_dir: None,
@@ -60,6 +63,7 @@ pub struct PreparedJob {
     pub model_source: &'static str,
     pub models: ModelPaths,
     pub pdfium: Option<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +96,12 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     }
     if options.max_pixels == 0 {
         bail!("invalid --max-pixels 0");
+    }
+    if let Some(spec) = options.pages.as_deref() {
+        // Catch `--pages 0` and other syntax errors before the job starts, so
+        // the CLI reports a configuration error (exit code 2), not a runtime
+        // failure (exit code 3).
+        validate_page_spec(spec).context("invalid --pages")?;
     }
 
     let mut files = Vec::new();
@@ -152,6 +162,8 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     let env_model_dir = std::env::var_os(MODEL_ENV);
     let model_dir = resolve_model_dir(options.model_dir.as_deref(), env_model_dir.as_deref());
     let models = discover_model_paths(&model_dir)?;
+    // Fast size check: catches a truncated/placeholder model without hashing it.
+    check_model_sizes(&models)?;
 
     let needs_pdfium = files.iter().any(|p| is_pdf(p));
     let pdfium = if needs_pdfium {
@@ -163,7 +175,7 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     let mut engine_config = EngineConfig::new(&model_dir);
     engine_config.device = options.device;
     engine_config.llama_dir = options.llama_dir.clone();
-    let (candidates, searched) = inspect_candidates(&engine_config);
+    let (candidates, searched, warnings) = inspect_candidates(&engine_config);
     if candidates.is_empty() {
         bail!(
             "llama-server executable not found (device {}). Set OCR_LLAMA_SERVER, pass \
@@ -184,6 +196,7 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
         model_source: model_dir_source(options.model_dir.as_deref(), env_model_dir.as_deref()),
         models,
         pdfium,
+        warnings,
     })
 }
 
@@ -199,6 +212,12 @@ pub fn run_job(
         files: prepared.files.len(),
         output_dir: prepared.output_dir.display().to_string(),
     });
+    for warning in &prepared.warnings {
+        events(ProgressEvent::Log {
+            level: ocr_core::LogLevel::Warning,
+            message: warning.clone(),
+        });
+    }
     events(ProgressEvent::Log {
         level: ocr_core::LogLevel::Info,
         message: format!(
@@ -346,7 +365,7 @@ pub fn run_job(
         llama_server: server.exe_path().display().to_string(),
         documents: documents.clone(),
     };
-    if let Err(error) = write_json(&prepared.output_dir.join("_meta.json"), &job_meta) {
+    if let Err(error) = write_job_meta(&prepared.output_dir, &job_meta) {
         events(ProgressEvent::Log {
             level: ocr_core::LogLevel::Warning,
             message: format!("cannot write _meta.json: {error:#}"),
@@ -417,7 +436,7 @@ fn process_document(
         let renderer =
             renderer.ok_or_else(|| anyhow!("internal error: PDF renderer not initialized"))?;
         let total_pages = renderer
-            .page_count(file, None)
+            .page_count(file, options.password.as_deref())
             .with_context(|| format!("cannot read PDF page count for {path_text}"))?;
         let indices = parse_page_selection(options.pages.as_deref(), total_pages)
             .with_context(|| format!("invalid --pages for {path_text}"))?;
@@ -434,11 +453,7 @@ fn process_document(
                 options.dpi
             ),
         });
-        let render_options = RenderOptions {
-            dpi: options.dpi,
-            max_pixels: options.max_pixels,
-            password: None,
-        };
+        let render_options = render_options(options);
         let outcome = renderer
             .render_pages(file, &indices, &render_options, cancel)
             .with_context(|| format!("cannot render PDF {path_text}"))?;
@@ -455,7 +470,7 @@ fn process_document(
         cancelled = outcome.cancelled;
 
         let total_selected = indices.len() as u32;
-        for page in outcome.pages {
+        for (selected_offset, page) in outcome.pages.into_iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
                 cancelled = true;
                 break;
@@ -464,7 +479,9 @@ fn process_document(
             events(ProgressEvent::PageStarted {
                 path: path_text.clone(),
                 page: page_number,
-                total_pages: total_selected,
+                total_pages: total_pages as u32,
+                selected_index: selected_offset as u32 + 1,
+                selected_total: total_selected,
             });
             let page_started = Instant::now();
             match recognize_cancellable(server, &page.jpeg, options.max_tokens, cancel) {
@@ -511,6 +528,8 @@ fn process_document(
             path: path_text.clone(),
             page: 1,
             total_pages: 1,
+            selected_index: 1,
+            selected_total: 1,
         });
         let page_started = Instant::now();
         let jpeg = prepare_image(file, options.max_pixels)
@@ -630,6 +649,16 @@ fn process_document(
     })
 }
 
+/// The PDF password must reach PDFium through `RenderOptions`; it is not stored
+/// anywhere else (no logs, no reports).
+fn render_options(options: &JobOptions) -> RenderOptions {
+    RenderOptions {
+        dpi: options.dpi,
+        max_pixels: options.max_pixels,
+        password: options.password.clone(),
+    }
+}
+
 /// Run one blocking request while polling `cancel`. On cancellation the server
 /// process tree is killed, which immediately aborts the HTTP request.
 fn recognize_cancellable(
@@ -654,15 +683,45 @@ fn recognize_cancellable(
     })
 }
 
+/// Images up to this multiple of `--max-pixels` are decoded and downscaled;
+/// anything larger is rejected before the bitmap is allocated.
+const DECODE_AREA_FACTOR: u64 = 2;
+
 fn prepare_image(path: &Path, max_pixels: u64) -> Result<Vec<u8>> {
-    let image = image::ImageReader::open(path)
+    // Read only the header first: a 6000x6000 PNG must not allocate its full
+    // RGBA bitmap just to be shrunk afterwards.
+    let (source_width, source_height) = image::ImageReader::open(path)
         .with_context(|| format!("cannot open {}", path.display()))?
         .with_guessed_format()
         .with_context(|| format!("cannot detect format of {}", path.display()))?
+        .into_dimensions()
+        .with_context(|| format!("cannot read image dimensions of {}", path.display()))?;
+    let source_pixels = source_width as u64 * source_height as u64;
+    let decode_limit = max_pixels.saturating_mul(DECODE_AREA_FACTOR);
+    if source_pixels > decode_limit {
+        bail!(
+            "{} is {source_width}x{source_height} ({source_pixels} pixels), more than the \
+             {decode_limit} pixels allowed for --max-pixels {max_pixels}; downscale it \
+             first or raise --max-pixels",
+            path.display()
+        );
+    }
+
+    let mut limits = image::Limits::default();
+    // 2x the allowed area at 8 bytes/pixel (16-bit RGBA) bounds the decoder.
+    limits.max_alloc = Some(decode_limit.saturating_mul(8).max(1));
+    limits.max_image_width = Some(decode_limit.min(u32::MAX as u64) as u32);
+    limits.max_image_height = Some(decode_limit.min(u32::MAX as u64) as u32);
+    let mut reader = image::ImageReader::open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?
+        .with_guessed_format()
+        .with_context(|| format!("cannot detect format of {}", path.display()))?;
+    reader.limits(limits);
+    let decoded = reader
         .decode()
         .with_context(|| format!("cannot decode {}", path.display()))?;
 
-    let mut image = image::DynamicImage::ImageRgb8(flatten_on_white(image));
+    let mut image = image::DynamicImage::ImageRgb8(flatten_on_white(decoded));
     let pixels = image.width() as u64 * image.height() as u64;
     if pixels > max_pixels {
         let factor = (max_pixels as f64 / pixels as f64).sqrt();
@@ -672,6 +731,14 @@ fn prepare_image(path: &Path, max_pixels: u64) -> Result<Vec<u8>> {
             image
                 .resize(width, height, image::imageops::FilterType::Triangle)
                 .to_rgb8(),
+        );
+    }
+    let final_pixels = image.width() as u64 * image.height() as u64;
+    if final_pixels > max_pixels {
+        bail!(
+            "internal error: {} stayed at {final_pixels} pixels after downscaling to \
+             --max-pixels {max_pixels}",
+            path.display()
         );
     }
 
@@ -724,6 +791,103 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Merge this job's documents into `_meta.json` under a cooperative file lock,
+/// so two jobs writing to the same output directory keep both sets of
+/// documents instead of the last writer winning.
+fn write_job_meta(dir: &Path, meta: &JobMeta) -> Result<()> {
+    let _lock = MetaLock::acquire(dir)?;
+    let path = dir.join("_meta.json");
+    let mut merged = meta.clone();
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(existing) = serde_json::from_slice::<JobMeta>(&bytes) {
+            merged.documents = merge_documents(existing.documents, meta.documents.clone());
+        }
+    }
+    let temp = dir.join(format!(".ocr-meta-{}.tmp", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec_pretty(&merged)?)
+        .with_context(|| format!("cannot write {}", temp.display()))?;
+    if path.exists() {
+        // std::fs::rename does not replace an existing file on Windows.
+        let _ = std::fs::remove_file(&path);
+    }
+    std::fs::rename(&temp, &path).with_context(|| format!("cannot replace {}", path.display()))?;
+    Ok(())
+}
+
+fn merge_documents(mut existing: Vec<DocumentMeta>, new: Vec<DocumentMeta>) -> Vec<DocumentMeta> {
+    for document in new {
+        if let Some(slot) = existing
+            .iter_mut()
+            .find(|entry| entry.source == document.source)
+        {
+            *slot = document;
+        } else {
+            existing.push(document);
+        }
+    }
+    existing
+}
+
+/// Cross-platform cooperative lock via an exclusive-create file. Concurrent
+/// ocr-tool jobs serialise their `_meta.json` update; a lock older than 60 s is
+/// treated as left behind by a crashed process.
+struct MetaLock {
+    path: PathBuf,
+    _file: Option<std::fs::File>,
+}
+
+impl MetaLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join(".ocr-meta.lock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        _file: Some(file),
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified
+                                .elapsed()
+                                .map(|age| age > Duration::from_secs(60))
+                                .unwrap_or(false)
+                            {
+                                let _ = std::fs::remove_file(&path);
+                                continue;
+                            }
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "timed out waiting for the _meta.json lock {}",
+                            path.display()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot create {}", path.display()))
+                }
+            }
+        }
+    }
+}
+
+impl Drop for MetaLock {
+    fn drop(&mut self) {
+        self._file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,9 +919,109 @@ mod tests {
         let path = tmp.path().join("test.png");
         let image = image::RgbImage::from_pixel(1000, 500, image::Rgb([255, 0, 0]));
         image.save(&path).unwrap();
-        let jpeg = prepare_image(&path, 1000).unwrap();
+        let jpeg = prepare_image(&path, 300_000).unwrap();
         assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
         let decoded = image::load_from_memory(&jpeg).unwrap();
-        assert!(decoded.width() as u64 * decoded.height() as u64 <= 1000);
+        assert!(decoded.width() as u64 * decoded.height() as u64 <= 300_000);
+    }
+
+    #[test]
+    fn huge_image_is_rejected_before_decoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("huge.png");
+        let image = image::RgbImage::from_pixel(2000, 2000, image::Rgb([0, 0, 0]));
+        image.save(&path).unwrap();
+        let error = prepare_image(&path, 100_000).unwrap_err().to_string();
+        assert!(error.contains("--max-pixels"), "{error}");
+        assert!(error.contains("downscale"), "{error}");
+    }
+
+    #[test]
+    fn preflight_rejects_pages_zero_as_a_configuration_error() {
+        let options = JobOptions {
+            inputs: vec![PathBuf::from("anything.png")],
+            pages: Some("0".to_string()),
+            ..JobOptions::default()
+        };
+        let error = preflight(&options).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("--pages"), "{text}");
+        assert!(text.contains("0"), "{text}");
+    }
+
+    #[test]
+    fn pdf_password_is_forwarded_to_render_options() {
+        let options = JobOptions {
+            password: Some("s3cret".to_string()),
+            dpi: 144,
+            max_pixels: 1234,
+            ..JobOptions::default()
+        };
+        let render = render_options(&options);
+        assert_eq!(render.password.as_deref(), Some("s3cret"));
+        assert_eq!(render.dpi, 144);
+        assert_eq!(render.max_pixels, 1234);
+    }
+
+    fn sample_document(source: &str) -> DocumentMeta {
+        DocumentMeta {
+            source: source.to_string(),
+            outputs: Vec::new(),
+            pages_total: 1,
+            pages_ok: 1,
+            pages_failed: 0,
+            errors: Vec::new(),
+            elapsed_ms: 1,
+            device: "cpu".to_string(),
+            model: "m".to_string(),
+            mmproj: "p".to_string(),
+            llama_server: "s".to_string(),
+            dpi: None,
+            format: "md".to_string(),
+            generated_at: now_rfc3339(),
+        }
+    }
+
+    fn sample_job(document: DocumentMeta) -> JobMeta {
+        JobMeta {
+            tool: "ocr-tool".to_string(),
+            tool_version: "0.0.0".to_string(),
+            generated_at: now_rfc3339(),
+            output_dir: "out".to_string(),
+            device_requested: "auto".to_string(),
+            device_used: "cpu".to_string(),
+            model_dir: "models".to_string(),
+            model: "m".to_string(),
+            mmproj: "p".to_string(),
+            llama_server: "s".to_string(),
+            documents: vec![document],
+        }
+    }
+
+    #[test]
+    fn parallel_jobs_merge_documents_in_meta_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["a.pdf", "b.pdf"]
+            .into_iter()
+            .map(|source| {
+                let dir = dir.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_job_meta(&dir, &sample_job(sample_document(source))).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let meta: JobMeta =
+            serde_json::from_slice(&std::fs::read(dir.join("_meta.json")).unwrap()).unwrap();
+        let sources: Vec<&str> = meta.documents.iter().map(|d| d.source.as_str()).collect();
+        assert!(sources.contains(&"a.pdf"), "{sources:?}");
+        assert!(sources.contains(&"b.pdf"), "{sources:?}");
+        assert!(!dir.join(".ocr-meta.lock").exists());
     }
 }

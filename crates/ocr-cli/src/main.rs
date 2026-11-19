@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use ocr_app::download::{human_bytes, DownloadProgress, MODEL_FILES};
+use ocr_app::download::{human_bytes, verify_models, DownloadProgress, MODEL_FILES};
 use ocr_app::{doctor, download_models, preflight, print_doctor, run_job, JobOptions};
 use ocr_core::{resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent, MODEL_ENV};
 
@@ -58,6 +58,10 @@ struct OcrArgs {
     /// PDF page selection, 1-based (for example 1-5,7)
     #[arg(long)]
     pages: Option<String>,
+
+    /// Password for encrypted PDFs (never written to logs or reports)
+    #[arg(long)]
+    password: Option<String>,
 
     /// Directory containing chandra-ocr-2.Q4_K_M.gguf and the mmproj
     #[arg(long)]
@@ -113,6 +117,8 @@ struct ModelsArgs {
 enum ModelsCommand {
     /// Download the pinned Q4_K_M model and mmproj from Hugging Face
     Download(DownloadArgs),
+    /// Check the model directory; --deep also verifies SHA-256 (~3.4 GB read)
+    Verify(VerifyArgs),
 }
 
 #[derive(Args)]
@@ -124,6 +130,17 @@ struct DownloadArgs {
     /// Replace existing files and restart partial downloads
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Args)]
+struct VerifyArgs {
+    /// Model directory (defaults to OCR_MODEL_DIR or app-data)
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Hash the weights and compare with the pinned SHA-256
+    #[arg(long)]
+    deep: bool,
 }
 
 fn parse_device(value: &str) -> Result<Device, String> {
@@ -163,6 +180,7 @@ fn run_ocr(args: OcrArgs) -> Result<i32> {
         device: args.device,
         dpi: args.dpi,
         pages: args.pages,
+        password: args.password,
         recursive: args.recursive,
         model_dir: args.model_dir,
         llama_dir: args.llama_dir,
@@ -266,6 +284,28 @@ fn run_models(args: ModelsArgs) -> Result<i32> {
                 }
             }
         }
+        ModelsCommand::Verify(verify) => {
+            let env_dir = std::env::var_os(MODEL_ENV);
+            let dir = resolve_model_dir(verify.dir.as_deref(), env_dir.as_deref());
+            match verify_models(&dir, verify.deep) {
+                Ok(()) => {
+                    println!(
+                        "Model OK: {} ({} checked)",
+                        dir.display(),
+                        if verify.deep {
+                            "size + SHA-256"
+                        } else {
+                            "size"
+                        }
+                    );
+                    Ok(0)
+                }
+                Err(error) => {
+                    eprintln!("ocr-tool: model verification failed: {error:#}");
+                    Ok(2)
+                }
+            }
+        }
     }
 }
 
@@ -325,9 +365,16 @@ impl ProgressPrinter {
                 eprintln!("[{index}/{total}] {path}");
             }
             ProgressEvent::PageStarted {
-                page, total_pages, ..
+                page,
+                total_pages,
+                selected_index,
+                selected_total,
+                ..
             } => {
-                eprint!("  page {page}/{total_pages}: recognizing...");
+                eprint!(
+                    "{}",
+                    page_progress_label(page, total_pages, selected_index, selected_total)
+                );
             }
             ProgressEvent::PageFinished {
                 page,
@@ -437,5 +484,33 @@ impl DownloadPrinter {
             eprintln!();
             self.line_open = false;
         }
+    }
+}
+
+/// `--pages 9-99` on an 11-page document must print `page 9/11`, not `9/3`.
+fn page_progress_label(page: u32, total: u32, selected_index: u32, selected_total: u32) -> String {
+    if selected_total != total {
+        format!(
+            "  page {page}/{total} (selected {selected_index}/{selected_total}): recognizing..."
+        )
+    } else {
+        format!("  page {page}/{total}: recognizing...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_progress_shows_document_page_and_selected_index() {
+        assert_eq!(
+            page_progress_label(9, 11, 1, 3),
+            "  page 9/11 (selected 1/3): recognizing..."
+        );
+        assert_eq!(
+            page_progress_label(1, 2, 1, 2),
+            "  page 1/2: recognizing..."
+        );
     }
 }

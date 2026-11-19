@@ -73,31 +73,45 @@ ocr-tool ocr <inputs...> -o <dir>
     [--device auto|gpu|cpu]
     [--dpi 192]
     [--pages 1-5,7]
+    [--password PASS]
     [--model-dir PATH] [--llama-dir PATH]
     [--recursive] [--json]
     [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
 
 ocr-tool doctor [--model-dir PATH] [--llama-dir PATH] [--json]
 ocr-tool models download [--dir PATH] [--force]
+ocr-tool models verify [--dir PATH] [--deep]
 ocr-tool gui
 ```
 
 - Inputs may be files and/or directories. Directories are scanned one level deep
   unless `--recursive` is given.
-- Pages are 1-based; ranges are clamped to the document length.
+- Pages are 1-based; ranges are clamped to the document length. A malformed
+  selection (including `0`) is rejected during preflight with exit code `2`.
+- `--password` unlocks encrypted PDFs. It is passed only to PDFium and is never
+  written to logs, `_meta.json` or the GUI log.
 - Progress is written to **stderr**; the final result (or `--json` report) goes to
-  **stdout**.
+  **stdout**. A selected-page list shorter than the document prints
+  `page 9/11 (selected 1/3)`, not `page 9/3`.
 - Exit codes: `0` success, `2` bad arguments/configuration/preflight (missing
-  input, model, PDFium), `3` processing/runtime failure or cancellation. Partial
-  page/document failures are reported and keep the successful outputs, but exit
-  with `3`.
+  input, model, PDFium; an explicit `--llama-dir` that does not exist is a
+  warning and falls back to the discovered runtime), `3` processing/runtime
+  failure or cancellation. Partial page/document failures are reported and keep
+  the successful outputs, but exit with `3`.
 - A page failure does not abort the document; other pages are still recognized.
+- `models verify` checks the pinned file sizes without reading the weights;
+  `--deep` additionally computes SHA-256 (reads ~3.4 GB). `models download`
+  recognises the same renamed pairs as OCR (`chandra-q4.gguf` + `mmproj.gguf`)
+  and reuses them instead of downloading again.
 
 Output files are named `<source-stem>.md`, `<source-stem>.html` (or only the
-requested format), with `-2`, `-3` suffixes on collision. Each document gets
-`<stem>_meta.json`; the job writes `_meta.json`. PDF pages are separated by
-`<!-- page N -->` in Markdown and `<section data-page="N">` in HTML. HTML is
-sanitized with ammonia and wrapped with `<meta charset="utf-8">`, `lang="ru"`.
+requested format), with `-2`, `-3` suffixes on collision. Windows device names
+(`CON`, `NUL`, `COM1`, …) get a trailing `_`. Each document gets
+`<stem>_meta.json`; the job merges its documents into `_meta.json` under a file
+lock, so two jobs writing to the same `-o` directory keep both sets of entries.
+PDF pages are separated by `<!-- page N -->` in Markdown and
+`<section data-page="N">` in HTML. HTML is sanitized with ammonia and wrapped
+with `<meta charset="utf-8">`, `lang="ru"`.
 
 ## GUI
 
@@ -109,10 +123,12 @@ cargo run --release -p ocr-gui
 ```
 
 One screen: add files/folder (drag and drop works), choose output directory,
-format, device, DPI, page range, recurse toggle; **Recognize** runs in a
-background thread; progress bar, per-page status, log, cancel, and “Open output
-folder”. The model/llama directories are optional overrides under “Advanced
-paths”. Cancel kills the request and the `llama-server` process tree.
+format, device, DPI, page range, PDF password (masked field), recurse toggle;
+**Recognize** runs in a background thread; progress bar, per-page status, log,
+cancel, and “Open output folder”. The model/llama directories are optional
+overrides under “Advanced paths”. Cancel kills the request and the
+`llama-server` process tree; closing the window cancels the job and waits for
+the sidecar to stop.
 
 ## How it works
 
@@ -129,13 +145,21 @@ input ─┬─ image ──────────────► JPEG (downsc
 ```
 
 - One `llama-server` per job, reused for all pages; it is started on a free
-  localhost port, health-checked for up to 180 s and killed with
-  `taskkill /T /F` (Windows) or a Unix process group on Drop/cancel.
+  localhost port with a unique `--alias`, health-checked for up to 180 s and
+  killed with `taskkill /T /F` and a kill-on-close Windows job object (Unix: a
+  process group plus `PR_SET_PDEATHSIG`) on Drop/cancel/crash. `/props` or
+  `/v1/models` must confirm the alias or model path before the server is
+  accepted, so a process that wins the free-port race is detected.
 - `--device auto` tries the Vulkan/Metal build first and automatically falls back
-  to the CPU build if startup fails. CPU is supported but slow.
+  to the CPU build if startup fails. With `--llama-dir` pointing at a parent of
+  `llama-vulkan` and `llama-cpu`, both builds are enumerated.
 - `--reasoning off` is passed to llama-server; if a build nevertheless puts the
   answer in `message.reasoning_content`, the client reads it.
 - Request timeout is 600 s/page by default (`--timeout`).
+- `doctor` prints the `llama-server --version` banner (5 s timeout) for every
+  candidate and the PDFium DLL file version alongside the component paths.
+- Sidecar logs live in `%TEMP%/ocr-tool`; empty logs are removed and only the 20
+  newest are kept.
 
 ### Search order
 
@@ -222,6 +246,11 @@ typical laptops.
   That is slower than a text extractor but handles scans uniformly.
 - Tables are preserved as HTML tables and converted to Markdown by `htmd`;
   complex merged cells may not round-trip perfectly into Markdown.
+- Images up to twice `--max-pixels` are decoded and downscaled; anything larger
+  is rejected before the bitmap is allocated (a 6000×6000 PNG does not
+  materialise a 354 MB buffer under a small `--max-pixels`).
+- Encrypted PDFs need `--password` (or the GUI’s masked field). PDFium decides
+  which encryption schemes are supported.
 - Printed/handwritten Russian quality depends on Chandra; stamps, handwriting
   and poor scans can contain errors. Always review financial/legal output.
 - No batch parallelization: pages are processed sequentially through one server.

@@ -44,8 +44,37 @@ pub struct DownloadProgress {
     pub skipped: bool,
 }
 
+/// Quick, network-free check used by preflight and `doctor`: the resolved model
+/// files must have exactly the pinned size. Hashing 3 GB on every run is not an
+/// option; `verify_models(dir, true)` does the full SHA-256 check on demand.
+pub fn check_model_sizes(models: &ocr_core::ModelPaths) -> Result<()> {
+    for (path, spec) in [
+        (&models.model, &MODEL_FILES[0]),
+        (&models.mmproj, &MODEL_FILES[1]),
+    ] {
+        let size = std::fs::metadata(path)
+            .with_context(|| format!("cannot read {}", path.display()))?
+            .len();
+        if size != spec.size {
+            bail!(
+                "{} has {} bytes, expected {} (pinned {}). Run `ocr-tool models download` \
+                 or check the model directory with `ocr-tool models verify`.",
+                path.display(),
+                size,
+                spec.size,
+                spec.name
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Download both GGUF files into `dir`, resuming `.part` files and verifying
 /// SHA-256 before the final rename. Existing valid files are skipped.
+///
+/// Files already present under the names accepted by [`ocr_core::discover_model_paths`]
+/// (for example `chandra-q4.gguf` + `mmproj.gguf`) are recognised instead of
+/// starting a 3.4 GB download.
 pub fn download_models(
     dir: &Path,
     force: bool,
@@ -53,12 +82,64 @@ pub fn download_models(
 ) -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("cannot create model directory {}", dir.display()))?;
+    let resolved = if force {
+        None
+    } else {
+        ocr_core::discover_model_paths(dir).ok()
+    };
     let mut result = Vec::new();
     for (index, spec) in MODEL_FILES.iter().enumerate() {
         let target = dir.join(spec.name);
         if force {
             let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_file(part_path(&target));
+        }
+        if !target.is_file() {
+            if let Some(paths) = &resolved {
+                let existing = if index == 0 {
+                    &paths.model
+                } else {
+                    &paths.mmproj
+                };
+                if existing.is_file() {
+                    let size = std::fs::metadata(existing).map(|m| m.len()).unwrap_or(0);
+                    if size != spec.size {
+                        bail!(
+                            "found {} ({} bytes) but the pinned {} is {} bytes; \
+                             pass --force to download the pinned file into {}",
+                            existing.display(),
+                            size,
+                            spec.name,
+                            spec.size,
+                            dir.display()
+                        );
+                    }
+                    let sha = sha256_file(existing)?;
+                    if sha.eq_ignore_ascii_case(spec.sha256) {
+                        progress(DownloadProgress {
+                            file_index: index + 1,
+                            file_count: MODEL_FILES.len(),
+                            file: existing
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(spec.name)
+                                .to_string(),
+                            downloaded: size,
+                            total: Some(size),
+                            done: true,
+                            skipped: true,
+                        });
+                        result.push(existing.clone());
+                        continue;
+                    }
+                    bail!(
+                        "found {} with the pinned size but a different SHA-256; \
+                         pass --force to download {}",
+                        existing.display(),
+                        spec.name
+                    );
+                }
+            }
         }
         if target.is_file() {
             let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
@@ -96,10 +177,10 @@ fn download_one(
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<()> {
     let part = part_path(target);
-    let mut existing = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    if existing > spec.size {
+    let part_len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let mut existing = resume_offset(part_len, spec.size);
+    if part_len > spec.size {
         let _ = std::fs::remove_file(&part);
-        existing = 0;
     }
 
     if existing == spec.size {
@@ -266,6 +347,16 @@ fn part_path(target: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// A `.part` file longer than the pinned file is corrupt; restart from zero.
+/// A shorter one is a valid resume point.
+fn resume_offset(part_len: u64, expected: u64) -> u64 {
+    if part_len > expected {
+        0
+    } else {
+        part_len
+    }
+}
+
 fn finish_part(part: &Path, target: &Path) -> Result<()> {
     if target.exists() {
         std::fs::remove_file(target)
@@ -298,13 +389,18 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// Validate an already downloaded model directory without touching the network.
-pub fn verify_models(dir: &Path) -> Result<()> {
-    for spec in MODEL_FILES {
-        let path = dir.join(spec.name);
+/// `deep` additionally hashes the 3.4 GB of weights; the shallow mode is what
+/// preflight and `doctor` use on every run.
+pub fn verify_models(dir: &Path, deep: bool) -> Result<()> {
+    let models = ocr_core::discover_model_paths(dir)?;
+    for (path, spec) in [
+        (&models.model, &MODEL_FILES[0]),
+        (&models.mmproj, &MODEL_FILES[1]),
+    ] {
         if !path.is_file() {
             bail!("missing {}", path.display());
         }
-        let size = std::fs::metadata(&path)?.len();
+        let size = std::fs::metadata(path)?.len();
         if size != spec.size {
             bail!(
                 "{} has {} bytes, expected {}",
@@ -313,14 +409,16 @@ pub fn verify_models(dir: &Path) -> Result<()> {
                 spec.size
             );
         }
-        let sha = sha256_file(&path)?;
-        if !sha.eq_ignore_ascii_case(spec.sha256) {
-            bail!(
-                "{} SHA-256 mismatch: expected {}, got {}",
-                path.display(),
-                spec.sha256,
-                sha
-            );
+        if deep {
+            let sha = sha256_file(path)?;
+            if !sha.eq_ignore_ascii_case(spec.sha256) {
+                bail!(
+                    "{} SHA-256 mismatch: expected {}, got {}",
+                    path.display(),
+                    spec.sha256,
+                    sha
+                );
+            }
         }
     }
     Ok(())
@@ -374,7 +472,74 @@ mod tests {
     #[test]
     fn verify_models_reports_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = verify_models(tmp.path()).unwrap_err().to_string();
-        assert!(err.contains("missing"));
+        let err = verify_models(tmp.path(), false).unwrap_err().to_string();
+        assert!(err.contains("gguf") || err.contains("model"), "{err}");
+    }
+
+    #[test]
+    fn verify_models_size_check_rejects_a_tiny_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(ocr_core::DEFAULT_MODEL_FILE),
+            vec![0u8; 1024],
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(ocr_core::DEFAULT_MMPROJ_FILE),
+            vec![0u8; 1024],
+        )
+        .unwrap();
+        let err = verify_models(tmp.path(), false).unwrap_err().to_string();
+        assert!(err.contains("expected"), "{err}");
+        assert!(err.contains("bytes"), "{err}");
+    }
+
+    #[test]
+    fn check_model_sizes_flags_a_truncated_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = tmp.path().join("chandra-q4.gguf");
+        let mmproj = tmp.path().join("mmproj.gguf");
+        std::fs::write(&model, vec![0u8; 32]).unwrap();
+        std::fs::write(&mmproj, vec![0u8; 16]).unwrap();
+        let paths = ocr_core::ModelPaths {
+            dir: tmp.path().to_path_buf(),
+            model,
+            mmproj,
+        };
+        assert!(check_model_sizes(&paths).is_err());
+    }
+
+    #[test]
+    fn download_models_recognises_renamed_files_and_never_starts_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("chandra-q4.gguf"), vec![0u8; 64]).unwrap();
+        std::fs::write(tmp.path().join("mmproj.gguf"), vec![0u8; 16]).unwrap();
+        let mut events = Vec::new();
+        let error = download_models(tmp.path(), false, &mut |event| events.push(event))
+            .expect_err("a 64-byte file must not be downloaded over");
+        let text = format!("{error:#}");
+        assert!(text.contains("pass --force"), "{text}");
+        assert!(text.contains("chandra-q4.gguf"), "{text}");
+        assert!(events.is_empty(), "progress must not start a download");
+    }
+
+    #[test]
+    fn resume_offset_restarts_only_for_oversized_parts() {
+        assert_eq!(resume_offset(0, 100), 0);
+        assert_eq!(resume_offset(50, 100), 50);
+        assert_eq!(resume_offset(100, 100), 100);
+        assert_eq!(resume_offset(101, 100), 0);
+    }
+
+    #[test]
+    fn finish_part_replaces_the_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("model.gguf");
+        let part = part_path(&target);
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        finish_part(&part, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!part.exists());
     }
 }
