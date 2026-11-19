@@ -90,6 +90,9 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     if options.max_tokens == 0 {
         bail!("invalid --max-tokens 0");
     }
+    if options.max_pixels == 0 {
+        bail!("invalid --max-pixels 0");
+    }
 
     let mut files = Vec::new();
     let mut unsupported = Vec::new();
