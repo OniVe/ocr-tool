@@ -125,6 +125,39 @@ try {
 }
 Check "broken engine exits 3" ($code -eq 3) "exit $code"
 
+# ------------------------------------------------- first-run configuration (no network)
+Write-Host "`n== first-run configuration without model/pdfium =="
+$TempRoot = Join-Path $env:TEMP ("ocr-tool-acceptance-" + $PID)
+$emptyModel = Join-Path $TempRoot "empty-models"
+$emptyOut = Join-Path $TempRoot "empty-out"
+New-Item -ItemType Directory -Force -Path $emptyModel, $emptyOut | Out-Null
+
+$noModelLog = Join-Path $TempRoot "no-model.log"
+$code = Invoke-Ocr @("ocr", $Jpg, "-o", $emptyOut, "--model-dir", $emptyModel) $noModelLog
+$noModelText = if (Test-Path $noModelLog) { Get-Content $noModelLog -Raw } else { "" }
+Check "CLI without model exits 2" ($code -eq 2) "exit $code"
+Check "CLI without model says 'Model files not found'" `
+    ($noModelText.Contains("Model files not found")) $noModelText
+
+$missingPdfium = Join-Path $TempRoot "no-pdfium/pdfium.dll"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $missingPdfium) | Out-Null
+$savedPdfiumEnv = $env:OCR_PDFIUM
+$env:OCR_PDFIUM = $missingPdfium
+Push-Location $TempRoot
+try {
+    $noPdfiumLog = Join-Path $TempRoot "no-pdfium.log"
+    $code = Invoke-Ocr @(
+        "ocr", $Pdf, "-o", (Join-Path $TempRoot "pdf-out"), "--model-dir", $ModelDir
+    ) $noPdfiumLog
+} finally {
+    Pop-Location
+    $env:OCR_PDFIUM = $savedPdfiumEnv
+}
+$noPdfiumText = if (Test-Path $noPdfiumLog) { Get-Content $noPdfiumLog -Raw } else { "" }
+Check "CLI PDF without pdfium exits 2" ($code -eq 2) "exit $code"
+Check "CLI PDF without pdfium says 'PDFium not found'" `
+    ($noPdfiumText.Contains("PDFium not found")) $noPdfiumText
+
 # ---------------------------------------------------------------- dist layout
 Write-Host "`n== dist-like layout (exe-relative runtime discovery) =="
 $dist = Join-Path $OutRoot "dist"
@@ -260,8 +293,32 @@ if (-not $SkipGui) {
             $process.WaitForExit()
         }
         Check "GUI stayed alive for 5 s" $alive $(if ($alive) { "" } else { "exit code $($process.ExitCode)" })
+
+        # First run against an empty model folder: the setup panel (Download /
+        # Replace / PDFium status) must render without crashing.
+        $savedModelDir = $env:OCR_MODEL_DIR
+        $env:OCR_MODEL_DIR = $emptyModel
+        try {
+            $firstRun = Start-Process -FilePath $Gui -PassThru
+            Start-Sleep -Seconds 5
+            $firstRunAlive = -not $firstRun.HasExited
+            if ($firstRunAlive) {
+                Stop-Process -Id $firstRun.Id -Force
+                $firstRun.WaitForExit()
+            }
+        } finally {
+            if ($null -ne $savedModelDir) {
+                $env:OCR_MODEL_DIR = $savedModelDir
+            } else {
+                Remove-Item Env:\OCR_MODEL_DIR -ErrorAction SilentlyContinue
+            }
+        }
+        Check "GUI first run with empty model dir stayed alive for 5 s" $firstRunAlive `
+            $(if ($firstRunAlive) { "" } else { "exit code $($firstRun.ExitCode)" })
     }
 }
+
+Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
 
 Write-Host "`n============================================"
 $leftover = @(Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object {

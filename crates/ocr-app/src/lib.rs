@@ -13,7 +13,7 @@ pub use download::{
 pub use job::{preflight, run_job, JobOptions, JobReport, PreparedJob};
 pub use setup::{
     check_model_status, model_status, pdfium_for_runtime, runtime_pdfium_candidate, runtime_status,
-    ModelStatus, RuntimeStatus,
+    ModelStatus, PdfiumSource, RuntimeStatus,
 };
 
 pub fn device_name(device: ocr_core::Device) -> &'static str {

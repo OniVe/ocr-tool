@@ -520,6 +520,7 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn sha256_of_known_content() {
@@ -675,6 +676,158 @@ mod tests {
         assert_eq!(resume_offset(50, 100), 50);
         assert_eq!(resume_offset(100, 100), 100);
         assert_eq!(resume_offset(101, 100), 0);
+    }
+
+    /// Minimal local HTTP stand-in for the pinned Hugging Face URL: honours
+    /// `Range`, sends the body slowly enough to cancel mid-transfer, and
+    /// records the requested start offset of every connection.
+    fn spawn_range_server(
+        content: std::sync::Arc<Vec<u8>>,
+        ranges: std::sync::Arc<std::sync::Mutex<Vec<Option<u64>>>>,
+        requests: usize,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, BufReader, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let Ok((stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_nodelay(true);
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let mut start = None;
+                loop {
+                    let mut header = String::new();
+                    match reader.read_line(&mut header) {
+                        Ok(0) => break,
+                        Ok(_) if header == "\r\n" || header == "\n" => break,
+                        Ok(_) => {
+                            if let Some(value) = header.to_ascii_lowercase().strip_prefix("range:") {
+                                if let Some(bytes) = value.trim().strip_prefix("bytes=") {
+                                    start = bytes
+                                        .split('-')
+                                        .next()
+                                        .and_then(|value| value.parse::<u64>().ok());
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                ranges.lock().unwrap().push(start);
+                let offset = start.unwrap_or(0).min(content.len() as u64) as usize;
+                let body = &content[offset..];
+                let mut writer = stream;
+                let head = if offset > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n\
+                         Content-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        offset,
+                        content.len() as u64 - 1,
+                        content.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                };
+                if writer.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                let _ = writer.flush();
+                for chunk in body.chunks(64 * 1024) {
+                    if writer.write_all(chunk).is_err() {
+                        break;
+                    }
+                    let _ = writer.flush();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn cancellation_mid_download_keeps_part_and_resumes_from_offset() {
+        let total = 8 * 1024 * 1024usize;
+        let content = std::sync::Arc::new(
+            (0..total)
+                .map(|index| (index.wrapping_mul(31) % 251) as u8)
+                .collect::<Vec<u8>>(),
+        );
+        let sha = {
+            let mut hasher = Sha256::new();
+            hasher.update(&content[..]);
+            hex::encode(hasher.finalize())
+        };
+        let ranges = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (addr, server) = spawn_range_server(content.clone(), ranges.clone(), 2);
+        let spec = ModelFile {
+            name: "mid-cancel.gguf",
+            url: Box::leak(format!("http://{addr}/mid-cancel.gguf").into_boxed_str()),
+            sha256: Box::leak(sha.into_boxed_str()),
+            size: total as u64,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join(spec.name);
+        let part = part_path(&target);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_download = cancel.clone();
+        let download_target = target.clone();
+        let download = std::thread::spawn(move || {
+            let mut noop = |_: DownloadProgress| {};
+            download_one(&spec, &download_target, 0, &cancel_download, &mut noop)
+        });
+
+        // Cancel only after the transfer has actually started, so this is a
+        // mid-download cancellation, not the pre-cancel case covered above.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0) == 0 {
+            assert!(Instant::now() < deadline, "the download did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancel.store(true, Ordering::SeqCst);
+
+        let error = download
+            .join()
+            .unwrap()
+            .expect_err("a mid-download cancel must stop the transfer");
+        assert!(format!("{error:#}").contains("cancel"), "{error:#}");
+        let partial_len = std::fs::metadata(&part)
+            .expect("the .part file must be kept for resume")
+            .len();
+        assert!(partial_len > 0, "some bytes must have been written");
+        assert!(
+            partial_len < total as u64,
+            "the transfer must not be complete: {partial_len} of {total}"
+        );
+        assert!(
+            !target.exists(),
+            "the final file must not exist after a cancelled download"
+        );
+
+        // The next run resumes from the retained offset instead of restarting.
+        let mut noop = |_: DownloadProgress| {};
+        download_one(&spec, &target, 0, &AtomicBool::new(false), &mut noop).unwrap();
+        server.join().unwrap();
+        let recorded = ranges.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "cancelled request + resume request");
+        assert_eq!(recorded[0], None, "the first request starts at zero");
+        assert_eq!(
+            recorded[1],
+            Some(partial_len),
+            "the resume request must use the .part offset"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), &content[..]);
+        assert!(!part.exists(), "the .part file is renamed after success");
     }
 
     #[test]

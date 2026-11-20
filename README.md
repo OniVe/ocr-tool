@@ -50,7 +50,9 @@ on start. If the model is missing it offers **Download model (~3.4 GB)** with
 progress and cancel, **Choose existing model folder…**, and **Open model
 folder**; if the runtime is missing it offers **Choose runtime folder…**. The
 model download is resumable and recognises an already present pair (including
-`chandra-q4.gguf` + `mmproj.gguf`), so it is not fetched twice.
+`chandra-q4.gguf` + `mmproj.gguf`), so it is not fetched twice. When the files
+exist but have the wrong size, **Replace / Re-download…** (with a confirmation
+step) deletes them and fetches the pinned pair again.
 
 Linux/macOS:
 
@@ -139,17 +141,27 @@ required.
   pinned download; PDFium is located and `llama-server` candidates are
   enumerated.
 - **Model missing or incomplete** — a setup panel says “Model not found in
-  <path>” and offers **Download model (~3.4 GB)** (background thread, per-file
-  bytes/percent, already-present files skipped, cancel keeps the `.part` file
-  for resume), **Choose existing model folder…** (rechecked immediately), and
-  **Open model folder**.
-- **Runtime missing** — a “Runtime not found” panel offers **Choose runtime
-  folder…**. The chosen folder fills llama dir (`llama-vulkan` / `llama-cpu`)
-  and PDFium (`pdfium/bin/<lib>`); in the release package the `runtime` folder
-  sits next to the executable, so it is found automatically. A missing runtime
-  never appears as a raw `os error 3` in the main status.
-- **Advanced paths** opens automatically while setup is incomplete and keeps
-  optional Model dir / llama dir / PDFium / Runtime dir overrides.
+  <path>” or “Model files incomplete in <path>” and offers **Download model
+  (~3.4 GB)** (background thread, per-file bytes/percent, already-present files
+  skipped, cancel keeps the `.part` file for resume), **Choose existing model
+  folder…** (rechecked immediately), **Open model folder**, and **Replace /
+  Re-download…**. Replace asks for confirmation, deletes the existing model
+  files and their `.part` remainders, and downloads the pinned pair again; it is
+  the GUI exit from the “incomplete / wrong size” state that a plain download
+  deliberately refuses to overwrite.
+- **Runtime missing** — a “Runtime not found” panel (llama-server) and a
+  separate “PDFium not found” panel each offer **Choose runtime folder…**; both
+  problems are shown when both components are absent. The chosen folder fills
+  llama dir (`llama-vulkan` / `llama-cpu`) and PDFium (`pdfium/bin/<lib>`); in
+  the release package the `runtime` folder sits next to the executable, so it is
+  found automatically. A missing runtime never appears as a raw `os error 3` in
+  the main status.
+- **PDFium source** — “Runtime ready” names where the library came from: the
+  chosen runtime folder/path, `OCR_PDFIUM`, or auto-discovery next to the app.
+  A visible warning is shown when `OCR_PDFIUM` overrides the bundled runtime.
+- **Advanced paths** opens automatically while setup is incomplete (model,
+  llama-server or PDFium missing) and keeps optional Model dir / llama dir /
+  PDFium / Runtime dir overrides.
 - Recognition: add files/folder (drag and drop works), output directory,
   format, device, DPI, page range, PDF password (masked field), recurse toggle;
   **Recognize** runs in a background thread with progress, per-page status,
@@ -215,7 +227,10 @@ PDFium:
 5. current directory
 
 If `OCR_PDFIUM` is set but invalid, the app reports an error instead of silently
-loading another library. A missing PDFium is a normal error, not a panic.
+loading another library. A missing PDFium is a normal error, not a panic. The
+GUI runtime status and `doctor` show which source won (runtime folder/path,
+`OCR_PDFIUM`, or auto-discovery); the GUI warns when `OCR_PDFIUM` overrides the
+bundled runtime.
 
 ## Build, test, package
 

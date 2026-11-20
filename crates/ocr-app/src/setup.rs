@@ -134,10 +134,40 @@ pub fn check_model_status(dir: &Path, model_size: u64, mmproj_size: u64) -> Mode
     }
 }
 
+/// Where the located PDFium library came from. The GUI shows it next to
+/// “Runtime ready” so a stale `OCR_PDFIUM` is not mistaken for the bundled
+/// runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfiumSource {
+    /// An explicit path: the GUI runtime folder, the PDFium field, or CLI `--pdfium`.
+    Explicit,
+    /// The ambient search found it through the `OCR_PDFIUM` environment variable.
+    Env,
+    /// The ambient search found it next to the executable, in `runtime/`, or in
+    /// the current directory.
+    Auto,
+}
+
+impl PdfiumSource {
+    pub fn is_env(self) -> bool {
+        matches!(self, PdfiumSource::Env)
+    }
+
+    /// Human-readable label for the GUI/doctor.
+    pub fn label(self) -> &'static str {
+        match self {
+            PdfiumSource::Explicit => "chosen runtime folder or path",
+            PdfiumSource::Env => "OCR_PDFIUM environment variable",
+            PdfiumSource::Auto => "auto-discovered next to the app",
+        }
+    }
+}
+
 /// Result of locating the external runtime (PDFium + llama-server candidates).
 #[derive(Debug, Clone)]
 pub struct RuntimeStatus {
     pub pdfium: Result<PathBuf, String>,
+    pub pdfium_source: PdfiumSource,
     pub llama: Vec<CandidateInfo>,
     pub llama_searched: Vec<String>,
     pub llama_warnings: Vec<String>,
@@ -162,6 +192,9 @@ impl RuntimeStatus {
             "Runtime not found: llama-server was not found; choose the runtime folder".to_string()
         } else if !self.pdfium_ready() {
             "PDFium not found; choose the runtime folder or set OCR_PDFIUM".to_string()
+        } else if self.pdfium_source.is_env() {
+            "Runtime ready; PDFium is taken from OCR_PDFIUM (not from the runtime folder)"
+                .to_string()
         } else {
             "Runtime ready".to_string()
         }
@@ -173,6 +206,16 @@ impl RuntimeStatus {
 /// ambient search order; `llama_dir` is the runtime folder or the directory
 /// that holds `llama-server`.
 pub fn runtime_status(llama_dir: Option<&Path>, pdfium: Option<&Path>) -> RuntimeStatus {
+    let pdfium_source = if pdfium.is_some() {
+        PdfiumSource::Explicit
+    } else if std::env::var_os(ocr_pdf::PDFIUM_ENV)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        PdfiumSource::Env
+    } else {
+        PdfiumSource::Auto
+    };
     let located = match pdfium {
         Some(path) => ocr_pdf::locate_pdfium_at(path),
         None => ocr_pdf::locate_pdfium(),
@@ -185,6 +228,7 @@ pub fn runtime_status(llama_dir: Option<&Path>, pdfium: Option<&Path>) -> Runtim
 
     RuntimeStatus {
         pdfium: located,
+        pdfium_source,
         llama,
         llama_searched,
         llama_warnings,
@@ -305,7 +349,25 @@ mod tests {
             pdfium_for_runtime(&runtime).as_deref(),
             Some(pdfium.as_path())
         );
+        assert_eq!(status.pdfium_source, PdfiumSource::Explicit);
         assert!(status.is_ready());
+    }
+
+    #[test]
+    fn runtime_ready_requires_pdfium_even_when_llama_is_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime");
+        let llama_dir = runtime.join("llama-cpu");
+        std::fs::create_dir_all(&llama_dir).unwrap();
+        std::fs::write(llama_dir.join(SERVER_EXE), b"fake").unwrap();
+
+        let status = runtime_status(Some(&runtime), Some(&runtime.join("absent")));
+        assert!(status.llama_ready(), "llama candidates: {:?}", status.llama);
+        assert!(!status.pdfium_ready());
+        assert!(
+            !status.is_ready(),
+            "a found llama-server must not make the runtime ready without PDFium"
+        );
     }
 
     #[test]

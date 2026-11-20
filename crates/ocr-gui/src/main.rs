@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ocr_app::download::{human_bytes, DownloadProgress, REPO_URL};
 use ocr_app::setup::{
-    model_status, pdfium_for_runtime, runtime_status, ModelStatus, RuntimeStatus,
+    model_status, pdfium_for_runtime, runtime_status, ModelStatus, PdfiumSource, RuntimeStatus,
 };
 use ocr_app::{download_models_cancellable, run_job, JobOptions, JobReport};
 use ocr_core::{resolve_model_dir, Device, OutputFormat, ProgressEvent, MODEL_ENV};
@@ -27,6 +27,7 @@ fn main() -> eframe::Result<()> {
 }
 
 const OK_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 170, 100);
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 160, 60);
 
 struct LogLine {
     text: String,
@@ -127,6 +128,7 @@ struct OcrApp {
     download_cancel: Arc<AtomicBool>,
     download_text: String,
     download_last_percent: Option<u32>,
+    confirm_replace: bool,
 }
 
 impl OcrApp {
@@ -161,6 +163,7 @@ impl OcrApp {
             },
             runtime: RuntimeStatus {
                 pdfium: Err(String::new()),
+                pdfium_source: PdfiumSource::Auto,
                 llama: Vec::new(),
                 llama_searched: Vec::new(),
                 llama_warnings: Vec::new(),
@@ -170,6 +173,7 @@ impl OcrApp {
             download_cancel: Arc::new(AtomicBool::new(false)),
             download_text: String::new(),
             download_last_percent: None,
+            confirm_replace: false,
         };
         app.refresh_setup();
         app
@@ -226,7 +230,10 @@ impl OcrApp {
     }
 
     fn setup_complete(&self) -> bool {
-        self.model_status.is_ready() && self.runtime.llama_ready()
+        // PDFium is part of the setup: a runtime with llama-server but no
+        // PDFium still fails on every PDF, so keep the paths (and the PDFium
+        // panel) visible instead of collapsing Advanced.
+        self.model_status.is_ready() && self.runtime.is_ready()
     }
 
     fn start(&mut self) {
@@ -306,6 +313,17 @@ impl OcrApp {
     /// existing valid files (including renamed pairs such as `chandra-q4.gguf`)
     /// are recognised by the downloader and skipped.
     fn start_download(&mut self) {
+        self.start_download_with_force(false);
+    }
+
+    /// Replace the model files: the downloader deletes the canonical files and
+    /// their `.part` remainders, then fetches the pinned pair again. Used by
+    /// the “Replace / Re-download” button after its explicit confirmation.
+    fn start_download_force(&mut self) {
+        self.start_download_with_force(true);
+    }
+
+    fn start_download_with_force(&mut self, force: bool) {
         if self.downloading || self.running {
             return;
         }
@@ -320,11 +338,23 @@ impl OcrApp {
             return;
         }
         self.downloading = true;
+        self.confirm_replace = false;
         self.progress = 0.0;
         self.download_text = "Starting download...".to_string();
         self.download_last_percent = None;
-        self.status = format!("Downloading model to {}...", dir.display());
-        self.log(format!("download: {REPO_URL} -> {}", dir.display()), false);
+        self.status = if force {
+            format!("Replacing model files in {}...", dir.display())
+        } else {
+            format!("Downloading model to {}...", dir.display())
+        };
+        self.log(
+            format!(
+                "download{}: {REPO_URL} -> {}",
+                if force { " (replace)" } else { "" },
+                dir.display()
+            ),
+            false,
+        );
         let cancel = Arc::new(AtomicBool::new(false));
         self.download_cancel = cancel.clone();
 
@@ -335,7 +365,7 @@ impl OcrApp {
             let mut emit = |event: DownloadProgress| {
                 let _ = tx.send(Msg::Download(event));
             };
-            let result = download_models_cancellable(&dir, false, &cancel, &mut emit)
+            let result = download_models_cancellable(&dir, force, &cancel, &mut emit)
                 .map_err(|error| format!("{error:#}"));
             guard.finish(result);
         });
@@ -476,13 +506,14 @@ impl OcrApp {
                         }
                         Err(error) => {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
-                            self.status = if cancelled {
-                                "Download cancelled; the .part file is kept and the next attempt resumes"
-                                    .to_string()
-                            } else {
-                                "Model download failed. See the log.".to_string()
-                            };
+                            self.status = download_failure_status(&error, cancelled);
                             self.log(format!("error: {error}"), true);
+                            if download_needs_replace(&error) {
+                                self.log(
+                                    "use the Replace / Re-download button to replace the existing model files",
+                                    true,
+                                );
+                            }
                             self.refresh_setup();
                         }
                     }
@@ -644,7 +675,12 @@ impl OcrApp {
 
         if !model_ready {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.heading(format!("Model not found in {}", model_dir.display()));
+                let incomplete = matches!(self.model_status, ModelStatus::Incomplete { .. });
+                ui.heading(if incomplete {
+                    format!("Model files incomplete in {}", model_dir.display())
+                } else {
+                    format!("Model not found in {}", model_dir.display())
+                });
                 ui.label(
                     "The Chandra OCR 2 weights (~3.4 GB) are not bundled. Download them once \
                      or point the app at a folder that already contains them.",
@@ -686,6 +722,36 @@ impl OcrApp {
                         self.status = "Cancelling download...".to_string();
                     }
                 });
+                // A canonical file with the wrong size (or a different SHA-256)
+                // cannot be fixed by a plain download: the downloader refuses
+                // to overwrite it. Offer the replace path the GUI can actually
+                // execute instead of only mentioning `--force`.
+                if !self.downloading && !self.running {
+                    if !self.confirm_replace {
+                        if ui.button("Replace / Re-download…").clicked() {
+                            self.confirm_replace = true;
+                        }
+                    } else {
+                        ui.colored_label(
+                            WARN_COLOR,
+                            "Replace deletes the existing model files (including any .part \
+                             remainder) and downloads the pinned pair again.",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(
+                                    egui::RichText::new("Yes, replace and re-download").strong(),
+                                ))
+                                .clicked()
+                            {
+                                self.start_download_force();
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.confirm_replace = false;
+                            }
+                        });
+                    }
+                }
                 if self.downloading {
                     ui.add(
                         egui::ProgressBar::new(self.progress)
@@ -703,7 +769,9 @@ impl OcrApp {
         }
 
         let runtime = self.runtime.clone();
+        let mut runtime_trouble = false;
         if !runtime.llama_ready() {
+            runtime_trouble = true;
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.heading("Runtime not found");
                 ui.label(
@@ -722,7 +790,11 @@ impl OcrApp {
                     }
                 });
             });
-        } else if !runtime.pdfium_ready() {
+        }
+        // PDFium is checked independently: a missing llama-server must not
+        // hide a missing PDFium (both break the first PDF job).
+        if !runtime.pdfium_ready() {
+            runtime_trouble = true;
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.heading("PDFium not found");
                 ui.label(
@@ -737,19 +809,28 @@ impl OcrApp {
                     }
                 });
             });
-        } else {
+        }
+        if !runtime_trouble {
             ui.horizontal(|ui| {
                 ui.colored_label(OK_COLOR, "Runtime ready");
                 ui.label(format!(
-                    "{} llama-server candidate(s), pdfium {}",
+                    "{} llama-server candidate(s), pdfium {} (from {})",
                     runtime.llama.len(),
                     runtime
                         .pdfium
                         .as_ref()
                         .map(|path| path.display().to_string())
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    runtime.pdfium_source.label()
                 ));
             });
+            if runtime.pdfium_source.is_env() {
+                ui.colored_label(
+                    WARN_COLOR,
+                    "PDFium is taken from OCR_PDFIUM, not from the runtime folder; unset \
+                     OCR_PDFIUM to use the bundled library.",
+                );
+            }
         }
 
         if model_ready && runtime.is_ready() {
@@ -962,12 +1043,13 @@ impl OcrApp {
                     self.model_status.dir().display()
                 ));
                 ui.label(format!(
-                    "PDFium: {}",
+                    "PDFium: {} (source: {})",
                     self.runtime
                         .pdfium
                         .as_ref()
                         .map(|path| path.display().to_string())
-                        .unwrap_or_else(|error| format!("not found ({error})"))
+                        .unwrap_or_else(|error| format!("not found ({error})")),
+                    self.runtime.pdfium_source.label()
                 ));
                 ui.label(format!(
                     "llama-server: {} candidate(s); searched {} location(s)",
@@ -1174,6 +1256,25 @@ fn is_pdf_input(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A model download that stopped because the existing canonical file has the
+/// wrong size or SHA-256 requires the GUI Replace path, not only `--force`
+/// (which is a CLI flag the GUI user cannot type).
+fn download_needs_replace(error: &str) -> bool {
+    error.contains("--force")
+}
+
+/// Status-bar text for a failed model download.
+fn download_failure_status(error: &str, cancelled: bool) -> String {
+    if cancelled {
+        "Download cancelled; the .part file is kept and the next attempt resumes".to_string()
+    } else if download_needs_replace(error) {
+        "Model files are incomplete or different; use Replace / Re-download to fetch the pinned files again."
+            .to_string()
+    } else {
+        "Model download failed. See the log.".to_string()
+    }
+}
+
 /// Map a full error chain to a short status-bar sentence. The raw chain (for
 /// example `os error 3`) goes to the log only; the main status must stay
 /// actionable on the first run.
@@ -1293,6 +1394,63 @@ mod tests {
                 .any(|candidate| candidate.exe.ends_with(Path::new("llama-cpu").join(server))),
             "candidates: {:?}",
             app.runtime.llama
+        );
+    }
+
+    #[test]
+    fn setup_complete_requires_pdfium_not_only_llama() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime");
+        let llama = runtime.join("llama-cpu");
+        std::fs::create_dir_all(&llama).unwrap();
+        let server = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
+        std::fs::write(llama.join(server), b"fake").unwrap();
+
+        let mut app = OcrApp::new();
+        app.model_status = ModelStatus::Ready {
+            dir: tmp.path().to_path_buf(),
+            paths: ocr_core::ModelPaths {
+                dir: tmp.path().to_path_buf(),
+                model: tmp.path().join("model.gguf"),
+                mmproj: tmp.path().join("mmproj.gguf"),
+            },
+            model_bytes: 0,
+            mmproj_bytes: 0,
+        };
+
+        app.runtime = runtime_status(Some(&runtime), Some(&runtime.join("absent-pdfium")));
+        assert!(app.runtime.llama_ready());
+        assert!(
+            !app.setup_complete(),
+            "llama-server alone must not mark the setup complete without PDFium"
+        );
+
+        let pdfium = runtime_pdfium_candidate(&runtime);
+        std::fs::create_dir_all(pdfium.parent().unwrap()).unwrap();
+        std::fs::write(&pdfium, b"fake").unwrap();
+        app.runtime = runtime_status(Some(&runtime), Some(&pdfium));
+        assert!(app.runtime.pdfium_ready());
+        assert_eq!(app.runtime.pdfium_source, ocr_app::PdfiumSource::Explicit);
+        assert!(app.setup_complete());
+    }
+
+    #[test]
+    fn force_required_download_error_points_at_the_replace_button() {
+        let raw = "found C:\\models\\chandra-q4.gguf (1024 bytes) but the pinned \
+                   chandra-ocr-2.Q4_K_M.gguf is 3066385440 bytes; pass --force to download \
+                   the pinned file into C:\\models";
+        assert!(download_needs_replace(raw));
+        let status = download_failure_status(raw, false);
+        assert!(status.contains("Replace / Re-download"), "{status}");
+        assert!(!status.contains("--force"), "{status}");
+        assert!(download_failure_status("download cancelled", true).contains("cancelled"));
+        assert_eq!(
+            download_failure_status("network down", false),
+            "Model download failed. See the log."
         );
     }
 
