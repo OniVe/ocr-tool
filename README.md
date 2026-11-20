@@ -51,6 +51,16 @@ Both downloads have progress and cancel; Recognize stays disabled while either
 is running. To keep everything in one place, set both the Model dir and the
 Runtime folder.
 
+On Windows the release GUI is linked as a Windows-subsystem executable:
+double-clicking `ocr-tool-gui.exe` opens only the GUI window, with no separate
+console. Startup, preflight/download errors and panics (with a backtrace) are
+appended to `%LOCALAPPDATA%\ocr-tool\logs\gui.log`
+(`<app-data>/ocr-tool/logs/gui.log` on Linux/macOS) and stay visible in the
+in-window Log panel; debug builds keep a console for logs. `ocr-tool.exe`
+remains a console program. Model/runtime downloads run on background threads,
+and `llama-server` is a separate, console-hidden sidecar managed by the GUI
+(in-process inference is out of scope).
+
 CLI parity (for robots/scripts):
 
 ```powershell
@@ -166,6 +176,11 @@ cargo run --release -p ocr-gui
 The GUI is self-sufficient on the first run; no CLI or environment variable is
 required.
 
+- **No console window** — the release binary uses the Windows GUI subsystem, so
+  starting it from Explorer creates only the app window. Diagnostics are written
+  to `%LOCALAPPDATA%\ocr-tool\logs\gui.log` (Linux/macOS:
+  `<app-data>/ocr-tool/logs/gui.log`); a fatal error before the window exists
+  also opens a dialog that names the log file. Debug builds keep the console.
 - On start, and whenever a path changes, it runs cheap checks (no OCR): the
   model directory is resolved and the two GGUF sizes are compared with the
   pinned download; PDFium is located and `llama-server` candidates are
@@ -302,9 +317,11 @@ signing/notarization is not configured.
 `scripts/acceptance.ps1` is the local acceptance test used during development.
 It expects `.tmp/models`, `.tmp/llama`, `.tmp/llama-cpu` and `.tmp/pdfium` and
 the sample files; it checks the recognized substrings, PDF pages, CPU fallback,
-`doctor`, GUI startup, and the offline `runtime --help` / `runtime verify`
-commands. `scripts/acceptance-runtime.ps1` performs the real ~69 MB runtime
-download E2E (archive SHA-256, `llama-server --version`, `doctor`, CPU OCR).
+`doctor`, GUI startup, the PE subsystem of both executables
+(`scripts/check-gui-subsystem.ps1`: GUI=2 Windows GUI, CLI=3 console), the GUI
+file log, and the offline `runtime --help` / `runtime verify` commands.
+`scripts/acceptance-runtime.ps1` performs the real ~69 MB runtime download E2E
+(archive SHA-256, `llama-server --version`, `doctor`, CPU OCR).
 
 ## Performance
 

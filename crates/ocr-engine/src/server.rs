@@ -749,11 +749,12 @@ fn tail_of(path: Option<&Path>) -> Option<String> {
     }
 }
 
+/// The GUI runs without a console, so the inference sidecar is a separate
+/// hidden process: `CREATE_NO_WINDOW` keeps its console from ever appearing.
+/// Fully in-process inference is out of scope for this architecture.
 #[cfg(windows)]
 fn configure_child(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
+    ocr_core::hide_console(command);
 }
 
 #[cfg(unix)]
@@ -976,15 +977,14 @@ fn kill_child_tree(child: &mut Child) {
     let pid = child.id();
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = Command::new("taskkill")
+        let mut command = Command::new("taskkill");
+        command
             .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .stderr(Stdio::null());
+        ocr_core::hide_console(&mut command);
+        let _ = command.status();
     }
     #[cfg(unix)]
     {

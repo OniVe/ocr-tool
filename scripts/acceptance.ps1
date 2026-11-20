@@ -88,6 +88,21 @@ $env:OCR_PDFIUM = $Pdfium
 Remove-Item Env:\OCR_LLAMA_SERVER -ErrorAction SilentlyContinue
 Remove-Item Env:\OCR_MODEL_DIR -ErrorAction SilentlyContinue
 
+# ---------------------------------------------------------------- PE subsystems
+# The GUI must never open a console window: GUI=2 (Windows GUI), CLI=3
+# (console). The same helper is available standalone for release checks.
+Write-Host "`n== executable subsystems =="
+$subsystemLog = Join-Path $OutRoot "subsystems.log"
+& (Join-Path $PSScriptRoot "check-gui-subsystem.ps1") -Gui $Gui -Cli $Exe *> $subsystemLog
+$subsystemCode = $LASTEXITCODE
+$subsystemText = if (Test-Path $subsystemLog) { Get-Content $subsystemLog -Raw } else { "" }
+Check "check-gui-subsystem.ps1 passes" ($subsystemCode -eq 0) $subsystemText
+Check "PE subsystem is GUI=2 and CLI=3" (
+    $subsystemText -match "ocr-tool-gui\.exe: subsystem 2" -and
+    $subsystemText -match "ocr-tool\.exe: subsystem 3"
+) $subsystemText
+Write-Host $subsystemText
+
 # ---------------------------------------------------------------- doctor
 Write-Host "`n== doctor =="
 $doctorText = & $Exe doctor --llama-dir $LlamaGpu --model-dir $ModelDir 2>&1 | Out-String
@@ -299,6 +314,9 @@ if (-not $SkipCpu) {
 # ---------------------------------------------------------------- GUI smoke
 if (-not $SkipGui) {
     Write-Host "`n== GUI smoke test (>= 5 s) =="
+    $guiLog = Join-Path $OutRoot "gui.log"
+    $savedGuiLogEnv = $env:OCR_GUI_LOG
+    $env:OCR_GUI_LOG = $guiLog
     if (-not (Test-Path $Gui)) {
         Check "GUI binary exists" $false $Gui
     } else {
@@ -361,6 +379,16 @@ if (-not $SkipGui) {
         }
         Check "GUI with a ready runtime stayed alive for 5 s" $readyAlive `
             $(if ($readyAlive) { "" } else { "exit code $($readyGui.ExitCode)" })
+
+        # A Windows-subsystem GUI has no stdout; the file log is the only
+        # diagnostic after a double-click.
+        $guiLogText = if (Test-Path $guiLog) { Get-Content $guiLog -Raw } else { "" }
+        Check "GUI wrote its file log" ($guiLogText -match "ocr-tool-gui [0-9.]+ starting") $guiLogText
+    }
+    if ($null -ne $savedGuiLogEnv) {
+        $env:OCR_GUI_LOG = $savedGuiLogEnv
+    } else {
+        Remove-Item Env:\OCR_GUI_LOG -ErrorAction SilentlyContinue
     }
 }
 

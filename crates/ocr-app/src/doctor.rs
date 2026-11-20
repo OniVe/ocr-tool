@@ -241,13 +241,15 @@ fn command_version(exe: &Path, timeout: Duration) -> Option<String> {
     if !exe.is_file() {
         return None;
     }
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+    // The GUI has no console; a console child would flash a black window.
+    ocr_core::hide_console(&mut command);
+    let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let reader = std::thread::spawn(move || {

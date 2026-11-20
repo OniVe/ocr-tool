@@ -1,3 +1,12 @@
+//! Desktop GUI for `ocr-tool`.
+//!
+//! Release binaries use the Windows GUI subsystem so a double-click opens only
+//! the app window, without a black console. Debug builds keep the console for
+//! logs; diagnostics are always appended to `gui.log` (see [`gui_log`]).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod gui_log;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -15,6 +24,15 @@ use ocr_core::{
 };
 
 fn main() -> eframe::Result<()> {
+    let log_path = gui_log::init();
+    gui_log::install_panic_hook();
+    gui_log::write(format!(
+        "ocr-tool-gui {} starting (pid {}, log {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        log_path.display()
+    ));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([980.0, 840.0])
@@ -22,11 +40,35 @@ fn main() -> eframe::Result<()> {
             .with_title("ocr-tool — Chandra OCR 2"),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "ocr-tool",
         options,
         Box::new(|_cc| Ok(Box::new(OcrApp::new()))),
-    )
+    );
+    match &result {
+        Ok(()) => gui_log::write("ocr-tool-gui exited normally"),
+        Err(error) => {
+            gui_log::write(format!("fatal: cannot start the GUI: {error:#}"));
+            show_startup_error(&format!("cannot start the GUI: {error:#}"), &log_path);
+        }
+    }
+    result
+}
+
+/// A release GUI has no console, so a fatal error before the window exists is
+/// reported twice: the file log keeps the full error/backtrace, and a dialog
+/// names the log path.
+fn show_startup_error(error: &str, log_path: &Path) {
+    let description = format!(
+        "{error}\n\nThe full error and backtrace are in:\n{}\n\n\
+         Errors after the window opens are shown in its Log panel.",
+        log_path.display()
+    );
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("ocr-tool — cannot start")
+        .set_description(description)
+        .show();
 }
 
 const OK_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 170, 100);
@@ -222,10 +264,11 @@ impl OcrApp {
     }
 
     fn log(&mut self, text: impl Into<String>, error: bool) {
-        self.logs.push(LogLine {
-            text: text.into(),
-            error,
-        });
+        let text = text.into();
+        // The window log is not available before a crash; mirror everything
+        // (especially preflight/download errors) into the file log.
+        gui_log::write(&text);
+        self.logs.push(LogLine { text, error });
         if self.logs.len() > 2000 {
             self.logs.drain(..200);
         }

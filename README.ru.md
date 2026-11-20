@@ -38,6 +38,15 @@ cargo build --release
 кнопка недоступны. Чтобы держать всё в одной папке, задайте и Model dir, и
 Runtime folder.
 
+В Windows release GUI собран как Windows-subsystem приложение: двойной клик по
+`ocr-tool-gui.exe` открывает только окно GUI, без отдельной консоли. Старт,
+ошибки preflight/загрузок и паники (с backtrace) дописываются в
+`%LOCALAPPDATA%\ocr-tool\logs\gui.log`
+(`<app-data>/ocr-tool/logs/gui.log` в Linux/macOS) и остаются в логе окна;
+debug-сборка сохраняет консоль для логов. `ocr-tool.exe` остаётся консольной
+программой. Загрузки модели/runtime идут в фоновых потоках, а `llama-server` —
+отдельный скрытый sidecar под управлением GUI (in-process inference вне рамок).
+
 CLI-паритет (для роботов/скриптов):
 
 ```powershell
@@ -141,6 +150,11 @@ cargo run --release -p ocr-gui
 
 GUI самодостаточен при первом запуске — CLI и переменные окружения не нужны.
 
+- **Без консольного окна** — release-бинарник использует Windows GUI subsystem,
+  поэтому запуск из Explorer создаёт только окно приложения. Диагностика
+  пишется в `%LOCALAPPDATA%\ocr-tool\logs\gui.log` (Linux/macOS:
+  `<app-data>/ocr-tool/logs/gui.log`); при фатальной ошибке до появления окна
+  открывается диалог с путём к логу. Debug-сборка сохраняет консоль.
 - При старте и при каждом изменении путей выполняются дешёвые проверки (без
   запуска OCR): каталог модели резолвится и размеры двух GGUF сверяются с
   закреплёнными; PDFium ищется, кандидаты `llama-server` перечисляются.
@@ -188,7 +202,10 @@ GUI самодостаточен при первом запуске — CLI и �
   подтверждают alias/путь модели; при несовпадении порт перевыбирается.
 - Процесс убивается деревом (`taskkill /T /F`) и Windows Job Object с
   `KILL_ON_JOB_CLOSE`; на Unix — группа процессов и `PR_SET_PDEATHSIG`. Поэтому
-  sidecar не остаётся после `taskkill /F` CLI или закрытия GUI.
+  sidecar не остаётся после `taskkill /F` CLI или закрытия GUI. На Windows
+  дочерние процессы (`llama-server`, `taskkill`, `llama-server --version`)
+  запускаются с `CREATE_NO_WINDOW`, чтобы у GUI без консоли не мигало ни одно
+  окно; сам `llama-server` — отдельный скрытый sidecar, которым управляет GUI.
 - `--device auto`: сначала GPU-сборка (Vulkan/Metal), при ошибке — CPU; если
   `--llama-dir` указывает на родителя `llama-vulkan` и `llama-cpu`,
   перечисляются обе сборки.

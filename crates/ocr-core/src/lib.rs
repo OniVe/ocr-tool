@@ -8,6 +8,7 @@ pub mod html;
 pub mod meta;
 pub mod naming;
 pub mod pages;
+pub mod process;
 pub mod progress;
 pub mod prompt;
 
@@ -24,5 +25,6 @@ pub use html::{
 pub use meta::{now_rfc3339, unix_timestamp_ms, DocumentMeta, JobMeta};
 pub use naming::{stem_of, OutputAllocator};
 pub use pages::{parse_page_selection, validate_page_spec};
+pub use process::hide_console;
 pub use progress::{LogLevel, ProgressEvent};
 pub use prompt::OCR_LAYOUT_PROMPT;
