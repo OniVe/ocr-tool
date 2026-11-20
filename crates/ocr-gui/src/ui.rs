@@ -1669,11 +1669,14 @@ impl EtaMode {
     }
 }
 
-fn eta_mode(device: Device) -> EtaMode {
+fn eta_mode(device: Device, runtime_cpu_only: bool) -> EtaMode {
     match device {
         Device::Gpu => EtaMode::Gpu,
-        // Auto may or may not use the GPU; use the slow, safe estimate.
-        Device::Auto | Device::Cpu => EtaMode::Cpu,
+        Device::Cpu => EtaMode::Cpu,
+        // Auto follows what the runtime can actually offer. `is_cpu_mode()`
+        // is true only when discovery found no GPU candidate.
+        Device::Auto if runtime_cpu_only => EtaMode::Cpu,
+        Device::Auto => EtaMode::Gpu,
     }
 }
 
@@ -1741,7 +1744,7 @@ fn eta_label(seconds: f64, multi_file: bool) -> String {
 
 fn page_eta(app: &OcrApp) -> Option<String> {
     let seconds = estimate_page_eta(
-        eta_mode(app.device),
+        eta_mode(app.device, app.is_cpu_mode()),
         app.page_selected_total,
         app.page_selected_index,
         app.pages_done,
@@ -2070,9 +2073,14 @@ mod tests {
 
     #[test]
     fn eta_heuristic_covers_cpu_gpu_auto_and_zero_pages() {
-        assert_eq!(eta_mode(Device::Cpu), EtaMode::Cpu);
-        assert_eq!(eta_mode(Device::Auto), EtaMode::Cpu);
-        assert_eq!(eta_mode(Device::Gpu), EtaMode::Gpu);
+        assert_eq!(eta_mode(Device::Cpu, false), EtaMode::Cpu);
+        assert_eq!(eta_mode(Device::Cpu, true), EtaMode::Cpu);
+        assert_eq!(eta_mode(Device::Gpu, true), EtaMode::Gpu);
+        assert_eq!(eta_mode(Device::Gpu, false), EtaMode::Gpu);
+        // Auto on a machine with a GPU candidate uses the GPU estimate;
+        // Auto without one falls back to the cautious CPU estimate.
+        assert_eq!(eta_mode(Device::Auto, false), EtaMode::Gpu);
+        assert_eq!(eta_mode(Device::Auto, true), EtaMode::Cpu);
 
         // 20 s startup + 12 min for one page; 10 s + 30 s for GPU.
         assert_eq!(initial_page_eta(EtaMode::Cpu, 1), Some(740.0));
@@ -2080,10 +2088,16 @@ mod tests {
         assert_eq!(initial_page_eta(EtaMode::Cpu, 0), None);
 
         // Three selected CPU pages: 20 + 3 * 720 = 2180 s.
-        let cpu = estimate_page_eta(EtaMode::Cpu, 3, 0, 0, 0.0).unwrap();
+        let cpu = estimate_page_eta(eta_mode(Device::Cpu, true), 3, 0, 0, 0.0).unwrap();
         assert_eq!(cpu, 2180.0);
         assert_eq!(format_seconds(cpu), "37 мин");
-        let gpu = estimate_page_eta(EtaMode::Gpu, 3, 0, 0, 0.0).unwrap();
+
+        // Auto + GPU: 10 + 3 * 30 = 100 s ≈ 2 min, not 12 min/page.
+        let auto_gpu = estimate_page_eta(eta_mode(Device::Auto, false), 3, 0, 0, 0.0).unwrap();
+        assert_eq!(auto_gpu, 100.0);
+        assert_eq!(format_seconds(auto_gpu), "2 мин");
+
+        let gpu = estimate_page_eta(eta_mode(Device::Gpu, false), 3, 0, 0, 0.0).unwrap();
         assert_eq!(gpu, 100.0);
         assert_eq!(format_seconds(gpu), "2 мин");
 

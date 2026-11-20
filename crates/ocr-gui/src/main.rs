@@ -527,7 +527,7 @@ impl OcrApp {
         }
     }
 
-    fn is_cpu_mode(&self) -> bool {
+    pub(crate) fn is_cpu_mode(&self) -> bool {
         match self.device {
             Device::Cpu => true,
             Device::Gpu => false,

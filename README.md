@@ -224,8 +224,9 @@ required.
   the sidecar to stop.
 - **Approximate ETA from the start.** Before the first page finishes the GUI
   shows a deliberately rough estimate: ~12 min per selected page plus ~20 s of
-  startup for CPU (and for Auto, as the cautious choice), ~30 s per page plus
-  ~10 s of startup for an explicitly selected GPU. After pages complete it
+  startup for CPU; ~30 s per page plus ~10 s of startup for GPU. Auto follows
+  runtime discovery: the GPU estimate when a GPU candidate is present, otherwise
+  the cautious CPU estimate. After pages complete it
   switches to the measured average. For multi-file jobs the label names the
   current file only; while the page count is still unknown no ETA is shown.
   This is an estimate, not a promise of exact timing.
