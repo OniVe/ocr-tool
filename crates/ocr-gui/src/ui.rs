@@ -1630,7 +1630,7 @@ fn progress_line(app: &OcrApp) -> Option<String> {
         parts.push("Готовим страницы…".to_string());
     }
     if let Some(eta) = page_eta(app) {
-        parts.push(format!("осталось ~{eta}"));
+        parts.push(eta);
     }
     if app.job_files_total > 1 {
         parts.push(format!(
@@ -1645,22 +1645,109 @@ fn progress_line(app: &OcrApp) -> Option<String> {
     }
 }
 
-fn page_eta(app: &OcrApp) -> Option<String> {
-    if app.pages_done == 0 || app.page_selected_total == 0 {
+/// Rough planning numbers before the first page completes. Auto is treated as
+/// CPU on purpose: a cautious estimate is better than promising GPU speed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EtaMode {
+    Cpu,
+    Gpu,
+}
+
+impl EtaMode {
+    fn startup_seconds(self) -> f64 {
+        match self {
+            EtaMode::Cpu => 20.0,
+            EtaMode::Gpu => 10.0,
+        }
+    }
+
+    fn seconds_per_page(self) -> f64 {
+        match self {
+            EtaMode::Cpu => 12.0 * 60.0,
+            EtaMode::Gpu => 30.0,
+        }
+    }
+}
+
+fn eta_mode(device: Device) -> EtaMode {
+    match device {
+        Device::Gpu => EtaMode::Gpu,
+        // Auto may or may not use the GPU; use the slow, safe estimate.
+        Device::Auto | Device::Cpu => EtaMode::Cpu,
+    }
+}
+
+fn initial_page_eta(mode: EtaMode, selected_pages: u32) -> Option<f64> {
+    if selected_pages == 0 {
         return None;
     }
-    let remaining_pages = app
-        .page_selected_total
-        .saturating_sub(app.page_selected_index);
-    if remaining_pages == 0 {
+    Some(mode.startup_seconds() + mode.seconds_per_page() * selected_pages as f64)
+}
+
+fn refined_page_eta(
+    selected_total: u32,
+    selected_index: u32,
+    pages_done: u32,
+    page_seconds_total: f64,
+) -> Option<f64> {
+    if selected_total == 0 || pages_done == 0 {
         return None;
     }
-    let average = app.page_seconds_total / app.pages_done as f64;
-    let seconds = average * remaining_pages as f64;
+    let average = page_seconds_total / pages_done as f64;
+    if !average.is_finite() || average <= 0.0 {
+        return None;
+    }
+    let remaining = selected_total.saturating_sub(selected_index);
+    if remaining == 0 {
+        return None;
+    }
+    let seconds = average * remaining as f64;
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
-    Some(format_seconds(seconds))
+    Some(seconds)
+}
+
+fn estimate_page_eta(
+    mode: EtaMode,
+    selected_total: u32,
+    selected_index: u32,
+    pages_done: u32,
+    page_seconds_total: f64,
+) -> Option<f64> {
+    if selected_total == 0 {
+        return None;
+    }
+    if pages_done == 0 {
+        initial_page_eta(mode, selected_total)
+    } else {
+        refined_page_eta(
+            selected_total,
+            selected_index,
+            pages_done,
+            page_seconds_total,
+        )
+    }
+}
+
+fn eta_label(seconds: f64, multi_file: bool) -> String {
+    let eta = format_seconds(seconds);
+    if multi_file {
+        format!("по текущему файлу осталось примерно ~{eta}")
+    } else {
+        format!("осталось примерно ~{eta}")
+    }
+}
+
+fn page_eta(app: &OcrApp) -> Option<String> {
+    let seconds = estimate_page_eta(
+        eta_mode(app.device),
+        app.page_selected_total,
+        app.page_selected_index,
+        app.pages_done,
+        app.page_seconds_total,
+    )?;
+    Some(eta_label(seconds, app.job_files_total > 1))
 }
 
 pub(crate) fn format_seconds(seconds: f64) -> String {
@@ -1972,11 +2059,66 @@ mod tests {
     }
 
     #[test]
-    fn eta_formats_seconds_and_minutes() {
+    fn eta_formats_seconds_minutes_and_hours() {
         assert_eq!(format_seconds(12.4), "13 с");
         assert_eq!(format_seconds(59.1), "60 с");
         assert_eq!(format_seconds(61.0), "2 мин");
         assert_eq!(format_seconds(3700.0), "1 ч 2 мин");
+        assert_eq!(format_seconds(3660.0), "1 ч 1 мин");
+        assert_eq!(format_seconds(7200.0), "2 ч 0 мин");
+    }
+
+    #[test]
+    fn eta_heuristic_covers_cpu_gpu_auto_and_zero_pages() {
+        assert_eq!(eta_mode(Device::Cpu), EtaMode::Cpu);
+        assert_eq!(eta_mode(Device::Auto), EtaMode::Cpu);
+        assert_eq!(eta_mode(Device::Gpu), EtaMode::Gpu);
+
+        // 20 s startup + 12 min for one page; 10 s + 30 s for GPU.
+        assert_eq!(initial_page_eta(EtaMode::Cpu, 1), Some(740.0));
+        assert_eq!(initial_page_eta(EtaMode::Gpu, 1), Some(40.0));
+        assert_eq!(initial_page_eta(EtaMode::Cpu, 0), None);
+
+        // Three selected CPU pages: 20 + 3 * 720 = 2180 s.
+        let cpu = estimate_page_eta(EtaMode::Cpu, 3, 0, 0, 0.0).unwrap();
+        assert_eq!(cpu, 2180.0);
+        assert_eq!(format_seconds(cpu), "37 мин");
+        let gpu = estimate_page_eta(EtaMode::Gpu, 3, 0, 0, 0.0).unwrap();
+        assert_eq!(gpu, 100.0);
+        assert_eq!(format_seconds(gpu), "2 мин");
+
+        assert_eq!(estimate_page_eta(EtaMode::Cpu, 0, 0, 0, 0.0), None);
+    }
+
+    #[test]
+    fn eta_refines_from_the_actual_average_after_the_first_page() {
+        // One page finished in 16 s, four selected pages remain.
+        let first = estimate_page_eta(EtaMode::Gpu, 5, 1, 1, 16.0).unwrap();
+        assert_eq!(first, 64.0);
+
+        // Three pages finished, 45 s total, two pages remain.
+        let later = estimate_page_eta(EtaMode::Gpu, 5, 3, 3, 45.0).unwrap();
+        assert_eq!(later, 30.0);
+        assert_eq!(format_seconds(later), "30 с");
+
+        // No remaining pages, no ETA.
+        assert_eq!(estimate_page_eta(EtaMode::Cpu, 5, 5, 5, 75.0), None);
+        assert_eq!(refined_page_eta(0, 0, 0, 0.0), None);
+        assert_eq!(refined_page_eta(5, 1, 0, 0.0), None);
+    }
+
+    #[test]
+    fn eta_wording_marks_the_current_file_for_multi_file_jobs() {
+        assert_eq!(eta_label(90.0, false), "осталось примерно ~2 мин");
+        assert_eq!(
+            eta_label(90.0, true),
+            "по текущему файлу осталось примерно ~2 мин"
+        );
+        assert_eq!(eta_label(45.0, false), "осталось примерно ~45 с");
+        assert_eq!(
+            eta_label(3700.0, true),
+            "по текущему файлу осталось примерно ~1 ч 2 мин"
+        );
     }
 
     #[test]
