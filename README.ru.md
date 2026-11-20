@@ -34,6 +34,13 @@ cargo run --release -p ocr-cli -- ocr samples\invoice_scan_ru.jpg -o out
 cargo run --release -p ocr-cli -- ocr samples\contract_ru.pdf -o out --pages 1-2
 ```
 
+CLI не обязателен: `target\release\ocr-tool-gui.exe` сам проверяет компоненты
+при старте. Если модели нет, GUI предлагает **Download model (~3.4 GB)**
+(прогресс, отмена, докачка `.part`; уже лежащие файлы, в том числе
+`chandra-q4.gguf` + `mmproj.gguf`, не перекачиваются), **Choose existing model
+folder…** и **Open model folder**. Если нет runtime — панель «Runtime not
+found» с выбором папки.
+
 Linux/macOS:
 
 ```bash
@@ -50,7 +57,10 @@ $env:OCR_MODEL_DIR    = "E:\models\chandra-ocr-2"
 $env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
 ```
 
-или флагами `--llama-dir`, `--model-dir`; в GUI — раздел «Advanced paths».
+или флагами `--llama-dir`, `--model-dir`, `--pdfium`; в GUI — поля Model dir,
+llama dir, PDFium в разделе «Advanced paths». Один выбор **Runtime dir**
+заполняет каталог llama-server и библиотеку PDFium из
+`runtime/<os>-<arch>/{llama-*,pdfium}`.
 
 ## CLI
 
@@ -58,7 +68,8 @@ $env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
 ocr-tool ocr <inputs...> -o <dir>
     [--format md|html|both] [--device auto|gpu|cpu] [--dpi 192]
     [--pages 1-5,7] [--password PASS] [--model-dir PATH] [--llama-dir PATH]
-    [--recursive] [--json] [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
+    [--pdfium PATH] [--recursive] [--json]
+    [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
 
 ocr-tool doctor [--model-dir PATH] [--llama-dir PATH] [--json]
 ocr-tool models download [--dir PATH] [--force]
@@ -98,11 +109,28 @@ cargo run --release -p ocr-gui
 # или target\release\ocr-tool-gui.exe без аргументов
 ```
 
-Один экран: файлы/папка (можно перетащить), выходная папка, формат, устройство,
-DPI, диапазон страниц, пароль PDF (скрытое поле), рекурсия; кнопка «Recognize»
-запускает фоновый поток, есть прогресс, лог, отмена и «Open output folder».
-Отмена убивает запрос и дерево процессов `llama-server`; закрытие окна
-отменяет задание и дожидается остановки sidecar.
+GUI самодостаточен при первом запуске — CLI и переменные окружения не нужны.
+
+- При старте и при каждом изменении путей выполняются дешёвые проверки (без
+  запуска OCR): каталог модели резолвится и размеры двух GGUF сверяются с
+  закреплёнными; PDFium ищется, кандидаты `llama-server` перечисляются.
+- **Модели нет или она неполная** — панель «Model not found in <path>» с
+  кнопками **Download model (~3.4 GB)** (фоновый поток, байты/проценты по
+  файлам, уже лежащие файлы пропускаются, отмена сохраняет `.part` для
+  докачки), **Choose existing model folder…** (сразу перепроверка) и **Open
+  model folder**.
+- **Нет runtime** — панель «Runtime not found» с **Choose runtime folder…**.
+  Выбранная папка заполняет llama dir (`llama-vulkan` / `llama-cpu`) и PDFium
+  (`pdfium/bin/<lib>`); в дистрибутиве папка `runtime` лежит рядом с exe и
+  находится автоматически. Сырой `os error 3` в главный статус не попадает.
+- **Advanced paths** разворачивается автоматически, пока setup не завершён;
+  остаются опциональные поля Model dir / llama dir / PDFium / Runtime dir.
+- Распознавание: файлы/папка (можно перетащить), выходная папка, формат,
+  устройство, DPI, диапазон страниц, пароль PDF (скрытое поле), рекурсия;
+  кнопка «Recognize» запускает фоновый поток, есть прогресс, лог, отмена и
+  «Open output folder». Отмена убивает запрос и дерево процессов
+  `llama-server`; закрытие окна отменяет задание и дожидается остановки
+  sidecar.
 
 ## Как работает
 
@@ -123,8 +151,9 @@ DPI, диапазон страниц, пароль PDF (скрытое поле)
   macOS `~/Library/Application Support/...`).
 - `llama-server`: `OCR_LLAMA_SERVER` → `--llama-dir` → `runtime/<os>-<arch>/llama-vulkan`
   (и `llama-metal`, `llama-cuda`, `llama-cpu`) рядом с exe или в текущем каталоге → `PATH`.
-- PDFium: `OCR_PDFIUM` → рядом с exe → `runtime/<os>-<arch>/pdfium/{bin,lib}` →
-  текущий каталог. Если `OCR_PDFIUM` задан неверно — понятная ошибка, без паники.
+- PDFium: `--pdfium` / папка runtime из GUI → `OCR_PDFIUM` → рядом с exe →
+  `runtime/<os>-<arch>/pdfium/{bin,lib}` → текущий каталог. Если `OCR_PDFIUM`
+  задан неверно — понятная ошибка, без паники.
 - Пустые логи sidecar в `%TEMP%/ocr-tool` удаляются, хранятся 20 последних.
 
 ## Сборка, тесты, упаковка
@@ -169,12 +198,15 @@ CPU — аварийный fallback, а не рабочий режим для п
 - Страницы обрабатываются последовательно, без параллелизма.
 - Linux/macOS локально не проверялись; CI-конфигурация приложена, но не
   запускалась.
-- В GUI нет загрузчика модели — используйте `models download`.
+- Модель GUI скачивает сама; внешний runtime (llama-server + PDFium) по-прежнему
+  ставится `scripts/fetch-runtime` или идёт в составе релиза (`runtime/` рядом
+  с exe) и выбирается в GUI кнопкой выбора папки runtime.
 - Лицензия весов OpenRAIL-M; коммерческое использование не гарантируется.
 - `samples/` содержит персональные данные и исключён из git, кроме `SOURCES.md`.
 
 ## Приватность и лицензии
 
 Распознавание полностью локальное. Сеть используется только для явных
-`models download` (Hugging Face) и `fetch-runtime` (GitHub). Телеметрии нет.
+загрузок модели (кнопка GUI **Download model** или `models download`,
+Hugging Face) и `fetch-runtime` (GitHub). Телеметрии нет.
 Код на Rust — MIT; сторонние компоненты сохраняют свои лицензии, см. [NOTICE](NOTICE).

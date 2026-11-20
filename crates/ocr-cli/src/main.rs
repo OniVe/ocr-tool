@@ -71,6 +71,10 @@ struct OcrArgs {
     #[arg(long)]
     llama_dir: Option<PathBuf>,
 
+    /// PDFium library file or a directory containing it (overrides OCR_PDFIUM)
+    #[arg(long)]
+    pdfium: Option<PathBuf>,
+
     /// Recurse into subdirectories
     #[arg(long)]
     recursive: bool,
@@ -184,6 +188,7 @@ fn run_ocr(args: OcrArgs) -> Result<i32> {
         recursive: args.recursive,
         model_dir: args.model_dir,
         llama_dir: args.llama_dir,
+        pdfium: args.pdfium,
         max_pixels: args.max_pixels,
         max_tokens: args.max_tokens,
         request_timeout_secs: args.timeout,

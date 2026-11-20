@@ -60,7 +60,17 @@ pub struct PdfRenderer {
 impl PdfRenderer {
     /// Load PDFium from the first valid location.
     pub fn new() -> Result<Self> {
-        let library = locate_pdfium()?;
+        Self::from_library(locate_pdfium()?)
+    }
+
+    /// Load PDFium from an explicit library file or a directory tree containing
+    /// it. Used when the caller (the GUI runtime folder, CLI `--pdfium`) already
+    /// knows where the library is.
+    pub fn new_at(path: &Path) -> Result<Self> {
+        Self::from_library(locate_pdfium_at(path)?)
+    }
+
+    fn from_library(library: PathBuf) -> Result<Self> {
         let bindings = Pdfium::bind_to_library(&library).map_err(|error| {
             anyhow!(
                 "failed to load PDFium from {}: {error}\n\
@@ -201,6 +211,21 @@ pub fn locate_pdfium() -> Result<PathBuf> {
     search_pdfium(env_value.as_deref(), exe_dir.as_deref(), cwd.as_deref())
 }
 
+/// Locate PDFium at an explicit path: either the library file itself or a
+/// directory tree containing it (the same layout search as the environment
+/// variable, including `bin/` and `lib/` subdirectories). Unlike
+/// [`locate_pdfium`] this never falls back to the executable directory, so the
+/// GUI can tell the user that the chosen runtime folder is wrong.
+pub fn locate_pdfium_at(path: &Path) -> Result<PathBuf> {
+    find_library(path, 3).ok_or_else(|| {
+        anyhow!(
+            "no PDFium library ({}) found at {}",
+            pdfium_library_names().join(", "),
+            path.display()
+        )
+    })
+}
+
 fn search_pdfium(
     env_value: Option<&OsStr>,
     exe_dir: Option<&Path>,
@@ -313,6 +338,32 @@ mod tests {
             search_pdfium(Some(file.as_os_str()), None, None).unwrap(),
             file
         );
+    }
+
+    #[test]
+    fn explicit_directory_and_nested_bin_are_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = pdfium_library_names()[0];
+        let direct = tmp.path().join(name);
+        std::fs::write(&direct, b"x").unwrap();
+        assert_eq!(locate_pdfium_at(tmp.path()).unwrap(), direct);
+
+        let nested = tmp.path().join("runtime").join("pdfium").join("bin");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join(name);
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(locate_pdfium_at(&tmp.path().join("runtime")).unwrap(), file);
+    }
+
+    #[test]
+    fn locate_pdfium_at_missing_path_is_a_clean_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = format!(
+            "{:#}",
+            locate_pdfium_at(&tmp.path().join("nope")).unwrap_err()
+        );
+        assert!(err.contains("no PDFium library"), "{err}");
+        assert!(err.contains("nope"), "{err}");
     }
 
     #[test]

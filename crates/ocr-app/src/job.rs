@@ -30,6 +30,9 @@ pub struct JobOptions {
     pub recursive: bool,
     pub model_dir: Option<PathBuf>,
     pub llama_dir: Option<PathBuf>,
+    /// PDFium library file or a directory containing it. Overrides the ambient
+    /// search order (`OCR_PDFIUM`, next to the executable, `runtime/<tag>`).
+    pub pdfium: Option<PathBuf>,
     pub max_pixels: u64,
     pub max_tokens: u32,
     pub request_timeout_secs: u64,
@@ -48,6 +51,7 @@ impl Default for JobOptions {
             recursive: false,
             model_dir: None,
             llama_dir: None,
+            pdfium: None,
             max_pixels: ocr_pdf::DEFAULT_MAX_PIXELS,
             max_tokens: ocr_engine::DEFAULT_MAX_TOKENS,
             request_timeout_secs: 600,
@@ -161,13 +165,23 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
 
     let env_model_dir = std::env::var_os(MODEL_ENV);
     let model_dir = resolve_model_dir(options.model_dir.as_deref(), env_model_dir.as_deref());
-    let models = discover_model_paths(&model_dir)?;
+    let models = discover_model_paths(&model_dir).with_context(|| {
+        format!(
+            "Model files not found in {}; use Download model or choose a folder",
+            model_dir.display()
+        )
+    })?;
     // Fast size check: catches a truncated/placeholder model without hashing it.
-    check_model_sizes(&models)?;
+    check_model_sizes(&models).with_context(|| {
+        format!(
+            "Model files in {} are incomplete; use Download model or choose a folder",
+            model_dir.display()
+        )
+    })?;
 
     let needs_pdfium = files.iter().any(|p| is_pdf(p));
     let pdfium = if needs_pdfium {
-        Some(ocr_pdf::locate_pdfium()?)
+        Some(locate_pdfium_for(options)?)
     } else {
         None
     };
@@ -198,6 +212,16 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
         pdfium,
         warnings,
     })
+}
+
+/// Resolve PDFium from `JobOptions.pdfium` (the GUI runtime folder or CLI
+/// `--pdfium`) or from the ambient search order, with an actionable error.
+fn locate_pdfium_for(options: &JobOptions) -> Result<PathBuf> {
+    let located = match options.pdfium.as_deref() {
+        Some(path) => ocr_pdf::locate_pdfium_at(path),
+        None => ocr_pdf::locate_pdfium(),
+    };
+    located.context("PDFium not found; choose the runtime folder or set OCR_PDFIUM")
 }
 
 /// Run one job: one llama-server for all pages, sequential page recognition.
@@ -270,7 +294,10 @@ pub fn run_job(
     }
 
     let renderer = if prepared.files.iter().any(|p| is_pdf(p)) {
-        Some(PdfRenderer::new()?)
+        let library = prepared.pdfium.as_deref().ok_or_else(|| {
+            anyhow!("internal error: PDFium path was not resolved during preflight")
+        })?;
+        Some(PdfRenderer::new_at(library)?)
     } else {
         None
     };
@@ -947,6 +974,40 @@ mod tests {
         let text = format!("{error:#}");
         assert!(text.contains("--pages"), "{text}");
         assert!(text.contains("0"), "{text}");
+    }
+
+    #[test]
+    fn explicit_pdfium_is_forwarded_and_missing_pdfium_is_actionable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library = tmp
+            .path()
+            .join("runtime")
+            .join("pdfium")
+            .join("bin")
+            .join(ocr_pdf::pdfium_library_names()[0]);
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, b"fake").unwrap();
+
+        let by_dir = JobOptions {
+            pdfium: Some(tmp.path().join("runtime")),
+            ..JobOptions::default()
+        };
+        assert_eq!(locate_pdfium_for(&by_dir).unwrap(), library);
+
+        let by_file = JobOptions {
+            pdfium: Some(library.clone()),
+            ..JobOptions::default()
+        };
+        assert_eq!(locate_pdfium_for(&by_file).unwrap(), library);
+
+        let missing = JobOptions {
+            pdfium: Some(tmp.path().join("nope")),
+            ..JobOptions::default()
+        };
+        let text = format!("{:#}", locate_pdfium_for(&missing).unwrap_err());
+        assert!(text.contains("PDFium not found"), "{text}");
+        assert!(text.contains("OCR_PDFIUM"), "{text}");
+        assert!(text.contains("choose the runtime folder"), "{text}");
     }
 
     #[test]

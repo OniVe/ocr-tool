@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -80,65 +81,77 @@ pub fn download_models(
     force: bool,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<Vec<PathBuf>> {
+    let never = AtomicBool::new(false);
+    download_models_cancellable(dir, force, &never, progress)
+}
+
+/// Cancel-aware variant used by the GUI: the flag is polled between 1 MiB
+/// chunks and between files. A cancelled download keeps its `.part` file, so a
+/// later run resumes instead of restarting 3.4 GB.
+pub fn download_models_cancellable(
+    dir: &Path,
+    force: bool,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(DownloadProgress),
+) -> Result<Vec<PathBuf>> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!("download cancelled before it started; partial .part files are kept for resume");
+    }
     std::fs::create_dir_all(dir)
         .with_context(|| format!("cannot create model directory {}", dir.display()))?;
-    let resolved = if force {
-        None
-    } else {
-        ocr_core::discover_model_paths(dir).ok()
-    };
     let mut result = Vec::new();
     for (index, spec) in MODEL_FILES.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            bail!("download cancelled; completed files are kept and partial .part files resume");
+        }
         let target = dir.join(spec.name);
         if force {
             let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_file(part_path(&target));
         }
-        if !target.is_file() {
-            if let Some(paths) = &resolved {
-                let existing = if index == 0 {
-                    &paths.model
-                } else {
-                    &paths.mmproj
-                };
-                if existing.is_file() {
-                    let size = std::fs::metadata(existing).map(|m| m.len()).unwrap_or(0);
-                    if size != spec.size {
-                        bail!(
-                            "found {} ({} bytes) but the pinned {} is {} bytes; \
-                             pass --force to download the pinned file into {}",
-                            existing.display(),
-                            size,
-                            spec.name,
-                            spec.size,
-                            dir.display()
-                        );
-                    }
-                    let sha = sha256_file(existing)?;
-                    if sha.eq_ignore_ascii_case(spec.sha256) {
-                        progress(DownloadProgress {
-                            file_index: index + 1,
-                            file_count: MODEL_FILES.len(),
-                            file: existing
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(spec.name)
-                                .to_string(),
-                            downloaded: size,
-                            total: Some(size),
-                            done: true,
-                            skipped: true,
-                        });
-                        result.push(existing.clone());
-                        continue;
-                    }
+        if !force && !target.is_file() {
+            // Recognise an existing valid file under another accepted name
+            // (for example chandra-q4.gguf + mmproj.gguf), even when only one
+            // half of the pair is present.
+            if let Some(existing) = find_existing_candidate(dir, index, spec) {
+                let size = std::fs::metadata(&existing)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                if size != spec.size {
                     bail!(
-                        "found {} with the pinned size but a different SHA-256; \
-                         pass --force to download {}",
+                        "found {} ({} bytes) but the pinned {} is {} bytes; \
+                         pass --force to download the pinned file into {}",
                         existing.display(),
-                        spec.name
+                        size,
+                        spec.name,
+                        spec.size,
+                        dir.display()
                     );
                 }
+                let sha = sha256_file(&existing)?;
+                if sha.eq_ignore_ascii_case(spec.sha256) {
+                    progress(DownloadProgress {
+                        file_index: index + 1,
+                        file_count: MODEL_FILES.len(),
+                        file: existing
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(spec.name)
+                            .to_string(),
+                        downloaded: size,
+                        total: Some(size),
+                        done: true,
+                        skipped: true,
+                    });
+                    result.push(existing);
+                    continue;
+                }
+                bail!(
+                    "found {} with the pinned size but a different SHA-256; \
+                     pass --force to download {}",
+                    existing.display(),
+                    spec.name
+                );
             }
         }
         if target.is_file() {
@@ -164,18 +177,73 @@ pub fn download_models(
                 target.display()
             );
         }
-        download_one(spec, &target, index, progress)?;
+        download_one(spec, &target, index, cancel, progress)?;
         result.push(target);
     }
     Ok(result)
+}
+
+/// Find an existing file for one pinned spec: the canonical name first, then
+/// the same naming rules as [`ocr_core::discover_model_paths`] (the mmproj is
+/// any file with `mmproj` in its name, the main model is the largest remaining
+/// `.gguf`). Looking per file means a renamed main model is still reused when
+/// the mmproj is absent, instead of re-downloading 3 GB.
+fn find_existing_candidate(dir: &Path, index: usize, spec: &ModelFile) -> Option<PathBuf> {
+    let canonical = dir.join(spec.name);
+    if canonical.is_file() {
+        return Some(canonical);
+    }
+    let mut main: Option<(u64, PathBuf)> = None;
+    let mut mmproj: Option<PathBuf> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_gguf = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false);
+        if !is_gguf {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name.contains("mmproj") {
+            if mmproj.is_none() {
+                mmproj = Some(path);
+            }
+            continue;
+        }
+        let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        if main.as_ref().map(|(best, _)| size > *best).unwrap_or(true) {
+            main = Some((size, path));
+        }
+    }
+    if index == 0 {
+        main.map(|(_, path)| path)
+    } else {
+        mmproj
+    }
 }
 
 fn download_one(
     spec: &ModelFile,
     target: &Path,
     index: usize,
+    cancel: &AtomicBool,
     progress: &mut dyn FnMut(DownloadProgress),
 ) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        bail!(
+            "download of {} cancelled before it started; a partial .part file is kept for resume",
+            spec.name
+        );
+    }
     let part = part_path(target);
     let part_len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     let mut existing = resume_offset(part_len, spec.size);
@@ -295,6 +363,16 @@ fn download_one(
                 done: false,
                 skipped: false,
             });
+        }
+        if cancel.load(Ordering::Relaxed) {
+            file.flush().ok();
+            drop(file);
+            bail!(
+                "download of {} cancelled after {} of {} bytes; the .part file is kept for resume",
+                spec.name,
+                downloaded,
+                spec.size
+            );
         }
         if downloaded > spec.size {
             bail!(
@@ -510,6 +588,36 @@ mod tests {
     }
 
     #[test]
+    fn per_file_lookup_finds_renamed_half_pairs_and_prefers_canonical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("chandra-q4.gguf");
+        std::fs::write(&main, vec![0u8; 64]).unwrap();
+        assert_eq!(
+            find_existing_candidate(tmp.path(), 0, &MODEL_FILES[0]).unwrap(),
+            main
+        );
+        assert!(
+            find_existing_candidate(tmp.path(), 1, &MODEL_FILES[1]).is_none(),
+            "no mmproj yet"
+        );
+
+        let mmproj = tmp.path().join("custom-mmproj.gguf");
+        std::fs::write(&mmproj, vec![0u8; 8]).unwrap();
+        assert_eq!(
+            find_existing_candidate(tmp.path(), 1, &MODEL_FILES[1]).unwrap(),
+            mmproj
+        );
+
+        let canonical = tmp.path().join(MODEL_FILES[0].name);
+        std::fs::write(&canonical, vec![0u8; 1]).unwrap();
+        assert_eq!(
+            find_existing_candidate(tmp.path(), 0, &MODEL_FILES[0]).unwrap(),
+            canonical,
+            "the canonical name must win over a larger renamed file"
+        );
+    }
+
+    #[test]
     fn download_models_recognises_renamed_files_and_never_starts_network() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("chandra-q4.gguf"), vec![0u8; 64]).unwrap();
@@ -521,6 +629,44 @@ mod tests {
         assert!(text.contains("pass --force"), "{text}");
         assert!(text.contains("chandra-q4.gguf"), "{text}");
         assert!(events.is_empty(), "progress must not start a download");
+    }
+
+    #[test]
+    fn cancellable_download_keeps_partial_part_file_without_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join(MODEL_FILES[0].name);
+        let part = part_path(&target);
+        let existing = vec![7u8; 4096];
+        std::fs::write(&part, &existing).unwrap();
+
+        let cancel = AtomicBool::new(true);
+        let mut events = Vec::new();
+        let error = download_models_cancellable(tmp.path(), false, &cancel, &mut |event| {
+            events.push(event)
+        })
+        .expect_err("a pre-cancelled download must not touch the network");
+        let text = format!("{error:#}");
+        assert!(text.contains("cancelled"), "{text}");
+        assert_eq!(
+            std::fs::read(&part).unwrap(),
+            existing,
+            "the .part file must be kept for resume"
+        );
+        assert!(!target.exists());
+        assert!(events.is_empty(), "no progress before the first request");
+    }
+
+    #[test]
+    fn non_cancelled_wrapper_still_skips_valid_renamed_files() {
+        // The size/SHA fast path is shared with the cancellable variant; a
+        // cancelled flag that is never set must behave like download_models.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("chandra-q4.gguf"), vec![0u8; 64]).unwrap();
+        std::fs::write(tmp.path().join("mmproj.gguf"), vec![0u8; 16]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let error = download_models_cancellable(tmp.path(), false, &cancel, &mut |_| {})
+            .expect_err("a 64-byte file must not be downloaded over");
+        assert!(format!("{error:#}").contains("pass --force"), "{error:#}");
     }
 
     #[test]

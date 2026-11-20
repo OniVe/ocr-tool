@@ -4,10 +4,17 @@
 pub mod doctor;
 pub mod download;
 pub mod job;
+pub mod setup;
 
 pub use doctor::{doctor, print_doctor, Check, DoctorReport};
-pub use download::{download_models, human_bytes, DownloadProgress, MODEL_FILES};
+pub use download::{
+    download_models, download_models_cancellable, human_bytes, DownloadProgress, MODEL_FILES,
+};
 pub use job::{preflight, run_job, JobOptions, JobReport, PreparedJob};
+pub use setup::{
+    check_model_status, model_status, pdfium_for_runtime, runtime_pdfium_candidate, runtime_status,
+    ModelStatus, RuntimeStatus,
+};
 
 pub fn device_name(device: ocr_core::Device) -> &'static str {
     match device {

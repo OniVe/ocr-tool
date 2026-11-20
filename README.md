@@ -45,6 +45,13 @@ cargo run --release -p ocr-cli -- ocr samples\invoice_scan_ru.jpg -o out
 cargo run --release -p ocr-cli -- ocr samples\contract_ru.pdf -o out --pages 1-2
 ```
 
+CLI is optional: `target\release\ocr-tool-gui.exe` performs its own setup check
+on start. If the model is missing it offers **Download model (~3.4 GB)** with
+progress and cancel, **Choose existing model folder…**, and **Open model
+folder**; if the runtime is missing it offers **Choose runtime folder…**. The
+model download is resumable and recognises an already present pair (including
+`chandra-q4.gguf` + `mmproj.gguf`), so it is not fetched twice.
+
 Linux/macOS:
 
 ```bash
@@ -62,8 +69,10 @@ $env:OCR_MODEL_DIR    = "E:\models\chandra-ocr-2"
 $env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
 ```
 
-or use `--llama-dir`, `--model-dir` on the CLI / fields under “Advanced paths”
-in the GUI.
+or use `--llama-dir`, `--model-dir`, `--pdfium` on the CLI / the Model dir,
+llama dir and PDFium fields under “Advanced paths” in the GUI. A single
+**Runtime dir** picker fills the llama directory and the PDFium library from
+`runtime/<os>-<arch>/{llama-*,pdfium}`.
 
 ## CLI
 
@@ -74,7 +83,7 @@ ocr-tool ocr <inputs...> -o <dir>
     [--dpi 192]
     [--pages 1-5,7]
     [--password PASS]
-    [--model-dir PATH] [--llama-dir PATH]
+    [--model-dir PATH] [--llama-dir PATH] [--pdfium PATH]
     [--recursive] [--json]
     [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
 
@@ -122,13 +131,31 @@ cargo run --release -p ocr-gui
 # or target\release\ocr-tool-gui.exe, no arguments
 ```
 
-One screen: add files/folder (drag and drop works), choose output directory,
-format, device, DPI, page range, PDF password (masked field), recurse toggle;
-**Recognize** runs in a background thread; progress bar, per-page status, log,
-cancel, and “Open output folder”. The model/llama directories are optional
-overrides under “Advanced paths”. Cancel kills the request and the
-`llama-server` process tree; closing the window cancels the job and waits for
-the sidecar to stop.
+The GUI is self-sufficient on the first run; no CLI or environment variable is
+required.
+
+- On start, and whenever a path changes, it runs cheap checks (no OCR): the
+  model directory is resolved and the two GGUF sizes are compared with the
+  pinned download; PDFium is located and `llama-server` candidates are
+  enumerated.
+- **Model missing or incomplete** — a setup panel says “Model not found in
+  <path>” and offers **Download model (~3.4 GB)** (background thread, per-file
+  bytes/percent, already-present files skipped, cancel keeps the `.part` file
+  for resume), **Choose existing model folder…** (rechecked immediately), and
+  **Open model folder**.
+- **Runtime missing** — a “Runtime not found” panel offers **Choose runtime
+  folder…**. The chosen folder fills llama dir (`llama-vulkan` / `llama-cpu`)
+  and PDFium (`pdfium/bin/<lib>`); in the release package the `runtime` folder
+  sits next to the executable, so it is found automatically. A missing runtime
+  never appears as a raw `os error 3` in the main status.
+- **Advanced paths** opens automatically while setup is incomplete and keeps
+  optional Model dir / llama dir / PDFium / Runtime dir overrides.
+- Recognition: add files/folder (drag and drop works), output directory,
+  format, device, DPI, page range, PDF password (masked field), recurse toggle;
+  **Recognize** runs in a background thread with progress, per-page status,
+  log, cancel, and “Open output folder”. Cancel kills the request and the
+  `llama-server` process tree; closing the window cancels the job and waits for
+  the sidecar to stop.
 
 ## How it works
 
@@ -181,10 +208,11 @@ Model directory:
 
 PDFium:
 
-1. `OCR_PDFIUM` (library file or directory)
-2. beside the executable
-3. `runtime/<os>-<arch>/pdfium/{bin,lib}`, `runtime/<os>/...`
-4. current directory
+1. `--pdfium` / the GUI runtime folder (library file or directory)
+2. `OCR_PDFIUM` (library file or directory)
+3. beside the executable
+4. `runtime/<os>-<arch>/pdfium/{bin,lib}`, `runtime/<os>/...`
+5. current directory
 
 If `OCR_PDFIUM` is set but invalid, the app reports an error instead of silently
 loading another library. A missing PDFium is a normal error, not a panic.
@@ -256,15 +284,18 @@ typical laptops.
 - No batch parallelization: pages are processed sequentially through one server.
 - Linux/macOS were not exercised on hardware in this snapshot; only Windows was
   verified locally. CI files are provided but were not run.
-- The GUI has no built-in model downloader; use the CLI (`models download`).
+- The GUI downloads the model itself; the external runtime (llama-server +
+  PDFium) is still installed by `scripts/fetch-runtime` or comes with the
+  release package (`runtime/` next to the executable) and can be chosen from
+  the GUI runtime-folder picker.
 - The model is licensed OpenRAIL-M; commercial use is not promised. See NOTICE.
 - `samples/` contains personal data and is gitignored except `SOURCES.md`.
 
 ## Privacy
 
-All recognition is local. The only network operations are explicit
-`models download` requests to Hugging Face and `fetch-runtime` requests to
-GitHub. No telemetry. Output files can contain sensitive text; protect them
+All recognition is local. The only network operations are explicit model
+downloads (the GUI **Download model** button or `models download`, both to
+Hugging Face) and `fetch-runtime` requests to GitHub. No telemetry. Output files can contain sensitive text; protect them
 accordingly.
 
 ## License

@@ -17,3 +17,6 @@ rfd = "0.15"
 open = "5"
 ocr-core = { path = "../ocr-core" }
 ocr-app = { path = "../ocr-app" }
+
+[dev-dependencies]
+tempfile.workspace = true
