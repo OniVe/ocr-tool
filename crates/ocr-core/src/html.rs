@@ -121,6 +121,15 @@ enum ListKind {
     Unordered,
 }
 
+/// One open list element. `owns_li` records that this very list opened the
+/// currently open `<li>`; a list closed with that item still open (the model
+/// dropped `</li>`) must not strip markers from the following text.
+#[derive(Clone, Copy)]
+struct ListFrame {
+    kind: ListKind,
+    owns_li: bool,
+}
+
 /// Strip duplicated list markers the model puts inside `<li>`.
 ///
 /// Chandra often returns `<ol><li>1. Утвердить…</li></ol>`: the `<ol>` already
@@ -136,7 +145,7 @@ pub fn normalize_list_markers(fragment: &str) -> String {
     }
 
     let mut out = String::with_capacity(fragment.len());
-    let mut lists: Vec<ListKind> = Vec::new();
+    let mut lists: Vec<ListFrame> = Vec::new();
     let mut in_li = false;
     let mut pending = false;
     let mut li_kind: Option<ListKind> = None;
@@ -155,24 +164,42 @@ pub fn normalize_list_markers(fragment: &str) -> String {
             let self_closing = lower.trim_end().ends_with("/>");
             match (name, closing, self_closing) {
                 ("ol", false, false) => {
-                    lists.push(ListKind::Ordered);
+                    lists.push(ListFrame {
+                        kind: ListKind::Ordered,
+                        owns_li: false,
+                    });
                     if in_li {
                         pending = false;
                     }
                 }
                 ("ul", false, false) => {
-                    lists.push(ListKind::Unordered);
+                    lists.push(ListFrame {
+                        kind: ListKind::Unordered,
+                        owns_li: false,
+                    });
                     if in_li {
                         pending = false;
                     }
                 }
                 ("ol", true, _) | ("ul", true, _) => {
-                    lists.pop();
+                    if let Some(frame) = lists.pop() {
+                        // Malformed list (`<li>` never closed): the open item
+                        // belongs to the list being closed, so later text is
+                        // ordinary content again.
+                        if frame.owns_li && in_li {
+                            in_li = false;
+                            pending = false;
+                            li_kind = None;
+                        }
+                    }
                 }
                 ("li", false, false) => {
                     in_li = true;
                     pending = true;
-                    li_kind = lists.last().copied();
+                    li_kind = lists.last().map(|frame| frame.kind);
+                    if let Some(frame) = lists.last_mut() {
+                        frame.owns_li = true;
+                    }
                 }
                 ("li", true, _) => {
                     in_li = false;
@@ -257,7 +284,7 @@ fn tag_name(lower_tag: &str) -> &str {
 /// whitespace. Returns `None` when the run does not start with a marker that
 /// has whitespace after it (so `1.1`, `-5` and dates stay intact).
 fn strip_leading_marker(text: &str, kind: ListKind) -> Option<String> {
-    let start = text.char_indices().find(|(_, ch)| !ch.is_whitespace())?.0;
+    let start = blank_prefix_len(text);
     let rest = &text[start..];
     let marker_end = match kind {
         ListKind::Ordered => {
@@ -292,9 +319,7 @@ fn strip_leading_marker(text: &str, kind: ListKind) -> Option<String> {
     };
 
     let after = &rest[marker_end..];
-    let whitespace_end = after
-        .find(|ch: char| !ch.is_whitespace())
-        .unwrap_or(after.len());
+    let whitespace_end = blank_prefix_len(after);
     if whitespace_end == 0 {
         // `1.Foo`/`-5`: not a duplicated list marker.
         return None;
@@ -304,6 +329,46 @@ fn strip_leading_marker(text: &str, kind: ListKind) -> Option<String> {
     stripped.push_str(&text[..start]);
     stripped.push_str(&after[whitespace_end..]);
     Some(stripped)
+}
+
+/// Byte length of the leading whitespace run, treating `&nbsp;`, `&#160;` and
+/// `&#xA0;` as one space: the model writes them after its own list markers.
+fn blank_prefix_len(text: &str) -> usize {
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        if let Some(ch) = rest.chars().next() {
+            if ch.is_whitespace() {
+                index += ch.len_utf8();
+                continue;
+            }
+        }
+        match nbsp_entity_len(rest) {
+            Some(len) => index += len,
+            None => break,
+        }
+    }
+    index
+}
+
+/// Byte length of a leading `&nbsp;`/`&#160;`/`&#xA0;` entity, if present.
+fn nbsp_entity_len(text: &str) -> Option<usize> {
+    let semicolon = text.find(';')?;
+    if semicolon > 9 {
+        return None;
+    }
+    let entity = &text[..=semicolon];
+    let body = entity.strip_prefix('&')?.strip_suffix(';')?;
+    let value = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else if let Some(decimal) = body.strip_prefix('#') {
+        decimal.parse::<u32>().ok()?
+    } else if body.eq_ignore_ascii_case("nbsp") {
+        0xa0
+    } else {
+        return None;
+    };
+    (value == 0xa0).then_some(entity.len())
 }
 
 /// Render the final standalone HTML document: UTF-8, `lang="ru"`, print-friendly
@@ -613,5 +678,46 @@ mod tests {
     fn markdown_keeps_russian_utf8() {
         let md = page_to_markdown("<div><p>Договор возмездного оказания услуг</p></div>");
         assert!(md.contains("Договор возмездного оказания услуг"));
+    }
+
+    #[test]
+    fn unclosed_list_item_does_not_swallow_following_paragraph_marker() {
+        // The model sometimes drops `</li>`. The paragraph after `</ol>` is
+        // ordinary text, so its leading "1." must survive.
+        let malformed = r#"<ol><li></ol><p>1. Важный пункт</p>"#;
+        let normalized = normalize_list_markers(malformed);
+        assert!(
+            normalized.contains("<p>1. Важный пункт</p>"),
+            "paragraph marker was stripped: {normalized}"
+        );
+
+        let clean = sanitize_fragment(malformed);
+        assert!(clean.contains("1. Важный пункт"), "{clean}");
+
+        let markdown = page_to_markdown(malformed);
+        assert!(markdown.contains("Важный пункт"), "{markdown}");
+    }
+
+    #[test]
+    fn nested_lists_strip_duplicated_markers_in_both_levels() {
+        let html = r#"<ol><li>1. Внешний<ol><li>2. Вложенный</li></ol>Конец</li></ol>"#;
+        let clean = sanitize_fragment(html);
+        assert!(clean.contains("Внешний"), "{clean}");
+        assert!(!clean.contains("1. Внешний"), "{clean}");
+        assert!(clean.contains("Вложенный"), "{clean}");
+        assert!(!clean.contains("2. Вложенный"), "{clean}");
+        assert!(clean.contains("Конец"), "{clean}");
+    }
+
+    #[test]
+    fn non_breaking_space_after_marker_counts_as_separator() {
+        for html in [
+            r#"<ol><li>2.&nbsp;Bar</li></ol>"#,
+            r#"<ol><li>2.&#160;Bar</li></ol>"#,
+            r#"<ol><li>2.&#xA0;Bar</li></ol>"#,
+        ] {
+            let clean = sanitize_fragment(html);
+            assert!(clean.contains("<li>Bar</li>"), "{html} -> {clean}");
+        }
     }
 }
