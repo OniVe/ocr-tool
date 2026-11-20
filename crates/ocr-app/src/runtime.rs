@@ -1067,10 +1067,32 @@ mod tests {
 
     #[test]
     fn traversal_paths_are_rejected() {
-        for raw in ["../evil", "a/../../evil", "/etc/passwd", "C:\\evil"] {
+        for raw in ["../evil", "a/../../evil", "/etc/passwd", "/evil"] {
             let error = safe_relative_path(Path::new(raw), None).unwrap_err();
             assert!(error.to_string().contains("unsafe path"), "{raw}: {error}");
         }
+
+        // Windows drive/prefix notation is only absolute on Windows. On Unix
+        // the same bytes are an ordinary (still root-contained) file name, so
+        // extracting it cannot escape the runtime directory.
+        let windows_style = safe_relative_path(Path::new("C:\\evil"), None);
+        if cfg!(windows) {
+            let error = windows_style.unwrap_err();
+            assert!(
+                error.to_string().contains("unsafe path"),
+                "C:\\evil: {error}"
+            );
+        } else if cfg!(unix) {
+            assert_eq!(
+                windows_style.unwrap().unwrap(),
+                PathBuf::from("C:\\evil"),
+                "on Unix C:\\evil is a normal relative name, not an absolute path"
+            );
+        }
+
+        let absolute = std::env::temp_dir().join("evil");
+        assert!(safe_relative_path(&absolute, None).is_err());
+
         assert_eq!(
             safe_relative_path(
                 Path::new("llama-b12535/llama-server.exe"),
@@ -1521,7 +1543,9 @@ mod tests {
 
     #[test]
     fn cached_archive_is_extracted_without_network() {
-        let bytes = make_zip(&[("llama-b12535/llama-server.exe", b"server", None)]);
+        let server = server_exe_name();
+        let entry = format!("llama-b12535/{server}");
+        let bytes = make_zip(&[(&entry, b"server", None)]);
         let sha = sha256_hex(&bytes);
         let asset = test_asset(
             "http://127.0.0.1:1/unreachable.zip",
@@ -1540,6 +1564,6 @@ mod tests {
             "the cache path is validated by size before extraction"
         );
         extract_and_install(&asset, &archive, tmp.path(), &AtomicBool::new(false)).unwrap();
-        assert!(tmp.path().join("llama-cpu/llama-server.exe").is_file());
+        assert!(tmp.path().join("llama-cpu").join(server).is_file());
     }
 }
