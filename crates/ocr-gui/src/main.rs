@@ -190,6 +190,24 @@ enum FailureKind {
     Unknown,
 }
 
+/// What the bottom status bar should say, derived from the app state instead of
+/// a stale sentence left over from the previous action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusPhase {
+    Empty,
+    Idle(usize),
+    Running,
+    /// A download failure/cancellation notice that must survive until the next
+    /// action (the detailed cause is in the setup card and log).
+    Notice,
+    Result {
+        files: usize,
+        pages: usize,
+        cancelled: bool,
+    },
+    Error,
+}
+
 struct OcrApp {
     inputs: Vec<PathBuf>,
     output_dir: String,
@@ -218,6 +236,7 @@ struct OcrApp {
     last_report: Option<JobReport>,
     last_error: Option<String>,
     last_error_kind: FailureKind,
+    download_notice: bool,
 
     job_started: Option<Instant>,
     job_files_total: usize,
@@ -314,6 +333,7 @@ impl OcrApp {
             last_report: None,
             last_error: None,
             last_error_kind: FailureKind::Unknown,
+            download_notice: false,
 
             job_started: None,
             job_files_total: 0,
@@ -459,6 +479,7 @@ impl OcrApp {
         if fixed {
             self.last_error = None;
             self.last_error_kind = FailureKind::Unknown;
+            self.download_notice = false;
         }
     }
 
@@ -481,6 +502,29 @@ impl OcrApp {
 
     fn can_start(&self) -> bool {
         self.start_blocker().is_none()
+    }
+
+    /// Derive the status-bar phase from high-level state. The stored `status`
+    /// is only used as the detail for running/error/notice phases; an idle list
+    /// always gets the actionable file hint instead of a leftover sentence.
+    fn status_phase(&self) -> StatusPhase {
+        if self.running || self.downloading || self.runtime_downloading {
+            StatusPhase::Running
+        } else if self.last_error.is_some() {
+            StatusPhase::Error
+        } else if self.download_notice {
+            StatusPhase::Notice
+        } else if let Some(report) = &self.last_report {
+            StatusPhase::Result {
+                files: report.documents_ok,
+                pages: report.pages_ok,
+                cancelled: report.cancelled,
+            }
+        } else if self.inputs.is_empty() {
+            StatusPhase::Empty
+        } else {
+            StatusPhase::Idle(self.inputs.len())
+        }
     }
 
     fn is_cpu_mode(&self) -> bool {
@@ -542,6 +586,7 @@ impl OcrApp {
         self.last_report = None;
         self.last_error = None;
         self.last_error_kind = FailureKind::Unknown;
+        self.download_notice = false;
         self.logs.clear();
         self.status = "Готовим документы…".to_string();
         self.job_started = Some(Instant::now());
@@ -607,6 +652,7 @@ impl OcrApp {
         self.download_file_total = 0;
         self.download_started = None;
         self.last_error = None;
+        self.download_notice = false;
         self.status = "Скачиваем модель…".to_string();
         self.log(
             format!(
@@ -640,6 +686,9 @@ impl OcrApp {
             .unwrap_or_default();
         self.refresh_setup();
         self.clear_setup_error_if_fixed();
+        if self.runtime.is_ready() {
+            self.download_notice = false;
+        }
         let status = runtime_message_ru(&self.runtime);
         self.log(
             format!("runtime folder: {} — {status}", folder.display()),
@@ -665,6 +714,9 @@ impl OcrApp {
         }
         self.refresh_setup();
         self.clear_setup_error_if_fixed();
+        if self.runtime.is_ready() {
+            self.download_notice = false;
+        }
     }
 
     /// Download llama-vulkan + llama-cpu + PDFium into the runtime folder.
@@ -692,6 +744,7 @@ impl OcrApp {
         self.runtime_started = None;
         self.runtime_component = None;
         self.last_error = None;
+        self.download_notice = false;
         self.status = "Скачиваем движок…".to_string();
         self.log(
             format!(
@@ -811,6 +864,7 @@ impl OcrApp {
                             }
                             self.last_error = None;
                             self.last_error_kind = FailureKind::Unknown;
+                            self.download_notice = false;
                             self.last_report = Some(report);
                         }
                         Err(error) => {
@@ -832,6 +886,7 @@ impl OcrApp {
                     match result {
                         Ok(files) => {
                             self.progress = 1.0;
+                            self.download_notice = false;
                             for file in &files {
                                 let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
                                 self.log(
@@ -857,6 +912,7 @@ impl OcrApp {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
                             self.status = download_failure_status(&error, cancelled);
                             self.download_text = self.status.clone();
+                            self.download_notice = true;
                             self.log(format!("error: {error}"), true);
                             if download_needs_replace(&error) {
                                 self.log(
@@ -879,6 +935,7 @@ impl OcrApp {
                     match result {
                         Ok(install) => {
                             self.progress = 1.0;
+                            self.download_notice = false;
                             let target = install.dir.clone();
                             self.apply_runtime_dir(target.clone());
                             self.log(
@@ -913,6 +970,7 @@ impl OcrApp {
                                     .to_string()
                             };
                             self.runtime_text = self.status.clone();
+                            self.download_notice = true;
                             self.log(format!("error: {error}"), true);
                             self.refresh_setup();
                         }
@@ -1401,10 +1459,146 @@ fn friendly_failure(error: &str) -> String {
     }
 }
 
+/// Bottom-bar sentence for the derived phase. Pure so the declensions and the
+/// empty/idle/result wording can be unit-tested without a window.
+fn status_text(phase: StatusPhase, detail: &str) -> String {
+    match phase {
+        StatusPhase::Empty => "Добавьте файлы — начнём с шага 1.".to_string(),
+        StatusPhase::Idle(files) => {
+            let noun = ui::plural_ru(files, "файл", "файла", "файлов");
+            let verb = if noun == "файл" {
+                "готов"
+            } else {
+                "готовы"
+            };
+            format!("{files} {noun} {verb} — проверьте папку и нажмите «Распознать».")
+        }
+        StatusPhase::Running | StatusPhase::Notice | StatusPhase::Error => {
+            let detail = detail.trim();
+            if detail.is_empty() {
+                "Подождите…".to_string()
+            } else {
+                detail.to_string()
+            }
+        }
+        StatusPhase::Result {
+            cancelled: true, ..
+        } => "Остановлено. Уже готовые страницы сохранены.".to_string(),
+        StatusPhase::Result {
+            files,
+            pages,
+            cancelled: false,
+        } => format!(
+            "Готово: {} {}, {} {}.",
+            files,
+            ui::plural_ru(files, "файл", "файла", "файлов"),
+            pages,
+            ui::plural_ru(pages, "страница", "страницы", "страниц"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ocr_app::runtime_pdfium_candidate;
+
+    #[test]
+    fn status_text_handles_empty_idle_result_and_error_states() {
+        assert_eq!(
+            status_text(StatusPhase::Empty, ""),
+            "Добавьте файлы — начнём с шага 1."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Idle(1), ""),
+            "1 файл готов — проверьте папку и нажмите «Распознать»."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Idle(2), ""),
+            "2 файла готовы — проверьте папку и нажмите «Распознать»."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Idle(5), ""),
+            "5 файлов готовы — проверьте папку и нажмите «Распознать»."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Idle(11), ""),
+            "11 файлов готовы — проверьте папку и нажмите «Распознать»."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Idle(21), ""),
+            "21 файл готов — проверьте папку и нажмите «Распознать»."
+        );
+
+        assert_eq!(
+            status_text(StatusPhase::Running, "Страница 2 из 5: распознаём…"),
+            "Страница 2 из 5: распознаём…"
+        );
+        assert_eq!(
+            status_text(StatusPhase::Notice, "Загрузка остановлена."),
+            "Загрузка остановлена."
+        );
+        assert_eq!(
+            status_text(StatusPhase::Error, "Не удалось прочитать файл."),
+            "Не удалось прочитать файл."
+        );
+
+        assert_eq!(
+            status_text(
+                StatusPhase::Result {
+                    files: 1,
+                    pages: 1,
+                    cancelled: false
+                },
+                "старый текст"
+            ),
+            "Готово: 1 файл, 1 страница."
+        );
+        assert_eq!(
+            status_text(
+                StatusPhase::Result {
+                    files: 2,
+                    pages: 5,
+                    cancelled: false
+                },
+                "старый текст"
+            ),
+            "Готово: 2 файла, 5 страниц."
+        );
+        assert_eq!(
+            status_text(
+                StatusPhase::Result {
+                    files: 1,
+                    pages: 3,
+                    cancelled: true
+                },
+                "старый текст"
+            ),
+            "Остановлено. Уже готовые страницы сохранены."
+        );
+    }
+
+    #[test]
+    fn status_phase_follows_busy_error_notice_and_idle_states() {
+        let mut app = OcrApp::new();
+        app.inputs.push(PathBuf::from("scan.pdf"));
+        assert_eq!(app.status_phase(), StatusPhase::Idle(1));
+
+        app.running = true;
+        assert_eq!(app.status_phase(), StatusPhase::Running);
+
+        app.running = false;
+        app.last_error = Some("Не удалось прочитать файл.".to_string());
+        assert_eq!(app.status_phase(), StatusPhase::Error);
+
+        app.last_error = None;
+        app.download_notice = true;
+        assert_eq!(app.status_phase(), StatusPhase::Notice);
+
+        app.download_notice = false;
+        app.inputs.clear();
+        assert_eq!(app.status_phase(), StatusPhase::Empty);
+    }
 
     #[test]
     fn done_guard_reports_a_panicking_worker() {

@@ -17,7 +17,7 @@ use ocr_app::runtime::runtime_download_mb;
 use ocr_app::setup::ModelStatus;
 use ocr_core::{Device, OutputFormat};
 
-use crate::{gui_log, prefs, FailureKind, OcrApp};
+use crate::{gui_log, prefs, status_text, FailureKind, OcrApp, StatusPhase};
 
 const ACCENT_LIGHT: Color32 = Color32::from_rgb(37, 99, 235);
 const ACCENT_DARK: Color32 = Color32::from_rgb(120, 162, 255);
@@ -291,6 +291,7 @@ pub fn draw(app: &mut OcrApp, ctx: &egui::Context) {
     apply_style(ctx);
     header(app, ctx);
     status_bar(app, ctx);
+    action_bar(app, ctx);
 
     egui::CentralPanel::default()
         .frame(
@@ -432,22 +433,25 @@ fn status_bar(app: &mut OcrApp, ctx: &egui::Context) {
                 .inner_margin(Margin::symmetric(20, 8)),
         )
         .show(ctx, |ui| {
+            let phase = app.status_phase();
+            let status = status_text(phase, &app.status);
             ui.horizontal(|ui| {
                 let busy = app.running || app.downloading || app.runtime_downloading;
-                let failed = app.last_error.is_some();
                 if busy {
                     spinner(ui);
                 } else {
-                    let (glyph, color) = if failed {
-                        ("!", error_color(dark))
-                    } else if app.last_report.is_some() {
-                        ("•", ok_color(dark))
-                    } else {
-                        ("•", muted(ui))
+                    let (glyph, color) = match phase {
+                        StatusPhase::Error => ("!", error_color(dark)),
+                        StatusPhase::Notice => ("!", warn_color(dark)),
+                        StatusPhase::Result {
+                            cancelled: true, ..
+                        } => ("!", warn_color(dark)),
+                        StatusPhase::Result { .. } => ("•", ok_color(dark)),
+                        _ => ("•", muted(ui)),
                     };
                     ui.label(RichText::new(glyph).strong().color(color));
                 }
-                ui.label(&app.status);
+                ui.label(&status);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if app.logs.iter().any(|line| line.error) && text_button(ui, "Журнал").clicked()
                     {
@@ -541,8 +545,8 @@ fn model_row(app: &mut OcrApp, ui: &mut egui::Ui) {
         });
     });
 
-    if !ready {
-        ui.horizontal_wrapped(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        if !ready {
             let can_download = !busy;
             if ui
                 .add_enabled(
@@ -553,15 +557,19 @@ fn model_row(app: &mut OcrApp, ui: &mut egui::Ui) {
             {
                 app.start_download();
             }
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new("Указать папку…").min_size(Vec2::new(0.0, 44.0)),
-                )
-                .clicked()
-            {
-                app.pick_model_dir();
-            }
+        }
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new("Указать папку…").min_size(Vec2::new(0.0, 44.0)),
+            )
+            .clicked()
+        {
+            app.pick_model_dir();
+        }
+        // Replacing only makes sense when some model files exist (incomplete
+        // pair or a ready pair the user wants to re-download).
+        if ready || incomplete {
             if ui
                 .add_enabled(
                     !busy,
@@ -572,48 +580,48 @@ fn model_row(app: &mut OcrApp, ui: &mut egui::Ui) {
             {
                 app.confirm_replace = true;
             }
+        }
+    });
+    if app.confirm_replace {
+        note(
+            ui,
+            "Замена удалит существующие файлы модели (включая недокачанные) и скачает \
+             закреплённую версию заново.",
+            warn_color(dark),
+        );
+        ui.horizontal(|ui| {
+            if big_button(ui, RichText::new("Да, заменить").strong()).clicked() {
+                app.start_download_force();
+            }
+            if big_button(ui, "Отмена").clicked() {
+                app.confirm_replace = false;
+            }
         });
-        if app.confirm_replace {
-            note(
-                ui,
-                "Замена удалит существующие файлы модели (включая недокачанные) и скачает \
-                 закреплённую версию заново.",
-                warn_color(dark),
-            );
-            ui.horizontal(|ui| {
-                if big_button(ui, RichText::new("Да, заменить").strong()).clicked() {
-                    app.start_download_force();
-                }
-                if big_button(ui, "Отмена").clicked() {
-                    app.confirm_replace = false;
-                }
-            });
-        }
-        if app.downloading {
-            ui.add(
-                egui::ProgressBar::new(app.progress)
-                    .desired_height(12.0)
-                    .fill(accent_fill(ui.visuals().dark_mode))
-                    .animate(true),
-            );
-            ui.label(
-                RichText::new(if app.download_text.is_empty() {
-                    "Готовим загрузку…"
-                } else {
-                    app.download_text.as_str()
-                })
-                .small()
-                .color(muted(ui)),
-            );
-            ui.horizontal(|ui| {
-                if big_button(ui, "Отменить загрузку").clicked() {
-                    app.download_cancel
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    app.status = "Останавливаем загрузку модели…".to_string();
-                }
-                spinner(ui);
-            });
-        }
+    }
+    if app.downloading {
+        ui.add(
+            egui::ProgressBar::new(app.progress)
+                .desired_height(12.0)
+                .fill(accent_fill(ui.visuals().dark_mode))
+                .animate(true),
+        );
+        ui.label(
+            RichText::new(if app.download_text.is_empty() {
+                "Готовим загрузку…"
+            } else {
+                app.download_text.as_str()
+            })
+            .small()
+            .color(muted(ui)),
+        );
+        ui.horizontal(|ui| {
+            if big_button(ui, "Отменить загрузку").clicked() {
+                app.download_cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                app.status = "Останавливаем загрузку модели…".to_string();
+            }
+            spinner(ui);
+        });
     }
 }
 
@@ -630,19 +638,18 @@ fn runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
         status_dot(ui, ready, !ready);
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Движок и просмотр PDF").strong());
+                ui.label(RichText::new("Движок распознавания и просмотра PDF").strong());
                 ui.label(
-                    RichText::new(format!("{size} · PDFium"))
+                    RichText::new(format!("{size} · скачивается один раз"))
                         .small()
                         .color(muted(ui)),
-                )
-                .on_hover_text("Движок распознавания и просмотр PDF");
+                );
             });
             let (text, color) = if ready {
                 ("Готов".to_string(), ok_color(dark))
             } else if llama_ready {
                 (
-                    "Движок есть, но не хватает просмотрщика PDF (PDFium).".to_string(),
+                    "Движок есть, но не хватает программы просмотра PDF.".to_string(),
                     warn_color(dark),
                 )
             } else {
@@ -655,8 +662,8 @@ fn runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
         });
     });
 
-    if !ready {
-        ui.horizontal_wrapped(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        if !ready {
             let label = match runtime_download_mb() {
                 Some(mb) => format!("Скачать движок (~{mb} МБ)"),
                 None => "Скачать движок".to_string(),
@@ -670,15 +677,19 @@ fn runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
             {
                 app.start_runtime_download(false);
             }
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new("Указать папку…").min_size(Vec2::new(0.0, 44.0)),
-                )
-                .clicked()
-            {
-                app.pick_runtime_dir();
-            }
+        }
+        if ui
+            .add_enabled(
+                !busy,
+                egui::Button::new("Указать папку…").min_size(Vec2::new(0.0, 44.0)),
+            )
+            .clicked()
+        {
+            app.pick_runtime_dir();
+        }
+        // Reinstalling is meaningful only when an engine is already present
+        // (ready, or a broken/incomplete runtime with llama-server found).
+        if ready || llama_ready {
             if ui
                 .add_enabled(
                     !busy,
@@ -689,23 +700,24 @@ fn runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
             {
                 app.confirm_runtime_replace = true;
             }
-        });
-        if app.confirm_runtime_replace {
-            note(
-                ui,
-                "Переустановка заменит движок и PDFium в папке движка закреплённой версией.",
-                warn_color(dark),
-            );
-            ui.horizontal(|ui| {
-                if big_button(ui, RichText::new("Да, переустановить").strong()).clicked()
-                {
-                    app.start_runtime_download(true);
-                }
-                if big_button(ui, "Отмена").clicked() {
-                    app.confirm_runtime_replace = false;
-                }
-            });
         }
+    });
+    if app.confirm_runtime_replace {
+        note(
+            ui,
+            "Переустановка заменит движок и программу просмотра PDF в папке движка \
+             закреплённой версией.",
+            warn_color(dark),
+        );
+        ui.horizontal(|ui| {
+            if big_button(ui, RichText::new("Да, переустановить").strong()).clicked()
+            {
+                app.start_runtime_download(true);
+            }
+            if big_button(ui, "Отмена").clicked() {
+                app.confirm_runtime_replace = false;
+            }
+        });
     }
 
     if app.runtime_downloading {
@@ -1005,48 +1017,61 @@ fn output_card(app: &mut OcrApp, ui: &mut egui::Ui) {
                     .color(muted(ui)),
             );
         });
-
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(2.0);
-
-        ui.horizontal_wrapped(|ui| {
-            let enabled = app.can_start();
-            let response = primary_button(ui, "Распознать", enabled);
-            let response = if let Some(hint) = app.start_blocker() {
-                response.on_disabled_hover_text(hint)
-            } else {
-                response.on_hover_text("Ctrl+Enter")
-            };
-            if response.clicked() {
-                app.start();
-            }
-            if app.running {
-                if big_button(ui, "Отмена")
-                    .on_hover_text("Esc · уже готовые страницы сохранятся")
-                    .clicked()
-                {
-                    app.cancel_job();
-                }
-                spinner(ui);
-            }
-        });
-        ui.label(
-            RichText::new("Можно свернуть окно — распознавание продолжится.")
-                .small()
-                .color(muted(ui)),
-        );
-        if app.is_cpu_mode() {
-            ui.label(
-                RichText::new(
-                    "Сейчас используется процессор: это надёжно, но медленнее — примерно \
-                     10–15 минут на страницу.",
-                )
-                .small()
-                .color(warn_color(ui.visuals().dark_mode)),
-            );
-        }
     });
+}
+
+/// Persistent primary action above the status bar. Keeping it outside the
+/// scroll area means «Распознать» stays visible with a long file list or while
+/// the setup card is on screen.
+fn action_bar(app: &mut OcrApp, ctx: &egui::Context) {
+    let dark = ctx.style().visuals.dark_mode;
+    egui::TopBottomPanel::bottom("primary-action")
+        .frame(
+            egui::Frame::new()
+                .fill(card_fill(dark))
+                .stroke(Stroke::new(1.0_f32, border(dark)))
+                .inner_margin(Margin::symmetric(20, 10)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let enabled = app.can_start();
+                let response = primary_button(ui, "Распознать", enabled);
+                let response = if let Some(hint) = app.start_blocker() {
+                    response.on_disabled_hover_text(hint)
+                } else {
+                    response.on_hover_text("Ctrl+Enter")
+                };
+                if response.clicked() {
+                    app.start();
+                }
+                if app.running {
+                    if big_button(ui, "Отмена")
+                        .on_hover_text("Esc · уже готовые страницы сохранятся")
+                        .clicked()
+                    {
+                        app.cancel_job();
+                    }
+                    spinner(ui);
+                }
+                let cpu = app.is_cpu_mode() && !app.running && app.start_blocker().is_none();
+                let hint = if app.running {
+                    "Идёт распознавание — можно свернуть окно.".to_string()
+                } else if let Some(blocker) = app.start_blocker() {
+                    blocker.to_string()
+                } else if cpu {
+                    "Процессор: ~10–15 мин на страницу. Можно свернуть окно.".to_string()
+                } else {
+                    "Можно свернуть окно — распознавание продолжится.".to_string()
+                };
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(hint).small().color(if cpu {
+                        warn_color(dark)
+                    } else {
+                        muted(ui)
+                    }));
+                });
+            });
+        });
 }
 
 fn progress_card(app: &mut OcrApp, ui: &mut egui::Ui) {
@@ -1794,6 +1819,7 @@ impl OcrApp {
             self.refresh_setup();
             self.clear_setup_error_if_fixed();
             if self.model_status.is_ready() {
+                self.download_notice = false;
                 self.status = "Модель найдена. Можно продолжать.".to_string();
             } else {
                 self.status =
@@ -1814,6 +1840,9 @@ impl OcrApp {
             self.llama_dir = folder.display().to_string();
             self.refresh_setup();
             self.clear_setup_error_if_fixed();
+            if self.runtime.is_ready() {
+                self.download_notice = false;
+            }
         }
     }
 
@@ -1825,6 +1854,9 @@ impl OcrApp {
             self.pdfium = file.display().to_string();
             self.refresh_setup();
             self.clear_setup_error_if_fixed();
+            if self.runtime.is_ready() {
+                self.download_notice = false;
+            }
         }
     }
 
@@ -1890,6 +1922,7 @@ impl OcrApp {
         self.last_report = None;
         self.last_error = None;
         self.last_error_kind = FailureKind::Unknown;
+        self.download_notice = false;
         self.progress = 0.0;
         self.job_progress = 0.0;
         self.current_file = None;
