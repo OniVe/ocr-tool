@@ -5,10 +5,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use image::codecs::jpeg::JpegEncoder;
+use ocr_core::html::escape_html;
 use ocr_core::{
-    clean_model_html, discover_model_paths, model_dir_source, now_rfc3339, parse_page_selection,
-    render_html_document, render_markdown_document, resolve_model_dir, stem_of, validate_page_spec,
-    DocumentMeta, JobMeta, ModelPaths, OutputAllocator, OutputFormat, ProgressEvent, MODEL_ENV,
+    clean_model_html, discover_model_paths, model_dir_source, now_rfc3339, page_to_markdown,
+    parse_layout_blocks, parse_page_selection, render_html_document, render_markdown_document,
+    resolve_model_dir, sanitize_label, stem_of, table_to_csv, validate_page_spec, BlockExtraction,
+    ChandraAssets, ChandraChunk, ChandraDocument, ChandraPage, DocumentMeta, JobMeta, ModelPaths,
+    OutputAllocator, OutputFormat, ProgressEvent, MODEL_ENV,
 };
 use ocr_engine::{inspect_candidates, EngineConfig, OcrServer};
 use ocr_pdf::{PdfRenderer, RenderOptions, DEFAULT_DPI};
@@ -36,6 +39,8 @@ pub struct JobOptions {
     pub max_pixels: u64,
     pub max_tokens: u32,
     pub request_timeout_secs: u64,
+    /// Write per-block crops and typed files (`none`/`images`/`all`).
+    pub extract_blocks: BlockExtraction,
 }
 
 impl Default for JobOptions {
@@ -55,8 +60,21 @@ impl Default for JobOptions {
             max_pixels: ocr_pdf::DEFAULT_MAX_PIXELS,
             max_tokens: ocr_engine::DEFAULT_MAX_TOKENS,
             request_timeout_secs: 600,
+            extract_blocks: BlockExtraction::None,
         }
     }
+}
+
+/// One recognized page plus the exact JPEG the model saw.
+///
+/// The JPEG is kept until the document is written so image blocks can be
+/// cropped with the same pixels the bboxes refer to.
+struct PageOutput {
+    page_number: Option<u32>,
+    html: String,
+    jpeg: Vec<u8>,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +382,8 @@ pub fn run_job(
                     llama_server: server.exe_path().display().to_string(),
                     dpi: None,
                     format: options.format.to_string(),
+                    images: Vec::new(),
+                    assets: Vec::new(),
                     generated_at: now_rfc3339(),
                 });
             }
@@ -452,7 +472,7 @@ fn process_document(
 ) -> Result<DocumentMeta> {
     let started = Instant::now();
     let path_text = file.display().to_string();
-    let mut pages: Vec<(Option<u32>, String)> = Vec::new();
+    let mut pages: Vec<PageOutput> = Vec::new();
     let mut errors = Vec::new();
     let mut pages_ok = 0usize;
     let mut pages_failed = 0usize;
@@ -531,7 +551,13 @@ fn process_document(
                             chars: clean.chars().count(),
                             elapsed: page_started.elapsed(),
                         });
-                        pages.push((Some(page_number), clean));
+                        pages.push(PageOutput {
+                            page_number: Some(page_number),
+                            html: clean,
+                            jpeg: page.jpeg,
+                            width: page.width,
+                            height: page.height,
+                        });
                     }
                 }
                 Err(error) => {
@@ -559,7 +585,7 @@ fn process_document(
             selected_total: 1,
         });
         let page_started = Instant::now();
-        let jpeg = prepare_image(file, options.max_pixels)
+        let (jpeg, width, height) = prepare_image(file, options.max_pixels)
             .with_context(|| format!("cannot read image {path_text}"))?;
         match recognize_cancellable(server, &jpeg, options.max_tokens, cancel) {
             Ok(answer) => {
@@ -575,7 +601,13 @@ fn process_document(
                         chars: clean.chars().count(),
                         elapsed: page_started.elapsed(),
                     });
-                    pages.push((None, clean));
+                    pages.push(PageOutput {
+                        page_number: None,
+                        html: clean,
+                        jpeg,
+                        width,
+                        height,
+                    });
                 }
             }
             Err(error) => {
@@ -603,19 +635,68 @@ fn process_document(
     if pages_ok > 0 {
         let stem = allocator.allocate(&stem_of(file));
         let title = stem.clone();
+        let legacy_pages: Vec<(Option<u32>, String)> = pages
+            .iter()
+            .map(|page| (page.page_number, page.html.clone()))
+            .collect();
+
+        let mut extracted_assets = Vec::new();
+        let needs_output = options.format.writes_json() || options.extract_blocks.writes_files();
+        let output = if needs_output {
+            let source_name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path_text.as_str());
+            let output = build_document_output(
+                source_name,
+                &stem,
+                &prepared.output_dir,
+                &pages,
+                options.extract_blocks,
+            );
+            extracted_assets = output.files.clone();
+            for warning in &output.warnings {
+                events(ProgressEvent::Log {
+                    level: ocr_core::LogLevel::Warning,
+                    message: format!("{path_text}: {warning}"),
+                });
+            }
+            Some(output)
+        } else {
+            None
+        };
+
         if options.format.writes_markdown() {
-            let markdown = render_markdown_document(&title, &pages);
+            let markdown = match &output {
+                Some(output) if options.extract_blocks.writes_files() => {
+                    render_markdown_with_blocks(&title, &output.pages, options.extract_blocks)
+                }
+                _ => render_markdown_document(&title, &legacy_pages),
+            };
             let path = prepared.output_dir.join(format!("{stem}.md"));
             std::fs::write(&path, markdown.as_bytes())
                 .with_context(|| format!("cannot write {}", path.display()))?;
             produced_outputs.push(path.display().to_string());
         }
         if options.format.writes_html() {
-            let html = render_html_document(&title, &pages);
+            let html = match &output {
+                Some(output) if options.extract_blocks.writes_files() => {
+                    render_html_with_blocks(&title, &output.pages, options.extract_blocks)
+                }
+                _ => render_html_document(&title, &legacy_pages),
+            };
             let path = prepared.output_dir.join(format!("{stem}.html"));
             std::fs::write(&path, html.as_bytes())
                 .with_context(|| format!("cannot write {}", path.display()))?;
             produced_outputs.push(path.display().to_string());
+        }
+        if options.format.writes_json() {
+            if let Some(output) = &output {
+                let path = prepared.output_dir.join(format!("{stem}.json"));
+                write_json(&path, &output.json)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
+                produced_outputs.push(path.display().to_string());
+            }
         }
 
         let meta = DocumentMeta {
@@ -636,6 +717,12 @@ fn process_document(
                 None
             },
             format: options.format.to_string(),
+            images: extracted_assets
+                .iter()
+                .filter(|path| path.to_ascii_lowercase().ends_with(".png"))
+                .cloned()
+                .collect(),
+            assets: extracted_assets,
             generated_at: now_rfc3339(),
         };
         let meta_path = prepared.output_dir.join(format!("{stem}_meta.json"));
@@ -672,6 +759,8 @@ fn process_document(
             None
         },
         format: options.format.to_string(),
+        images: Vec::new(),
+        assets: Vec::new(),
         generated_at: now_rfc3339(),
     })
 }
@@ -714,7 +803,632 @@ fn recognize_cancellable(
 /// anything larger is rejected before the bitmap is allocated.
 const DECODE_AREA_FACTOR: u64 = 2;
 
-fn prepare_image(path: &Path, max_pixels: u64) -> Result<Vec<u8>> {
+/// Minimum crop edge; smaller blocks are usually noise.
+const MIN_IMAGE_SIZE: u32 = 8;
+/// Hard cap on files written for one document to avoid runaway output.
+const MAX_BLOCK_FILES: usize = 2000;
+
+#[derive(Debug, Clone)]
+struct OutputBlock {
+    block_id: String,
+    label: String,
+    content: String,
+    text: String,
+    assets: ChandraAssets,
+}
+
+#[derive(Debug, Clone)]
+struct OutputPage {
+    page_number: Option<u32>,
+    blocks: Vec<OutputBlock>,
+}
+
+struct DocumentOutput {
+    json: ChandraDocument,
+    pages: Vec<OutputPage>,
+    files: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetKind {
+    Png,
+    Md,
+    Html,
+    Csv,
+    Tex,
+    Txt,
+}
+
+fn is_image_label(label: &str) -> bool {
+    label.eq_ignore_ascii_case("image") || label.eq_ignore_ascii_case("figure")
+}
+
+fn is_visual_label(label: &str) -> bool {
+    is_image_label(label) || label.eq_ignore_ascii_case("diagram")
+}
+
+/// Typed files written for a label in `--extract-blocks all` mode. PNG is
+/// listed for completeness; the actual crop is created separately.
+fn asset_kinds(label: &str) -> &'static [AssetKind] {
+    const TEXT: &[AssetKind] = &[AssetKind::Png, AssetKind::Md];
+    const TABLE: &[AssetKind] = &[AssetKind::Png, AssetKind::Html, AssetKind::Csv];
+    const EQUATION: &[AssetKind] = &[AssetKind::Png, AssetKind::Tex];
+    const CODE: &[AssetKind] = &[AssetKind::Png, AssetKind::Txt];
+    const FORM: &[AssetKind] = &[AssetKind::Png, AssetKind::Html];
+    const IMAGE: &[AssetKind] = &[AssetKind::Png, AssetKind::Txt];
+    const CHEMICAL: &[AssetKind] = &[AssetKind::Png, AssetKind::Html, AssetKind::Txt];
+
+    if label.eq_ignore_ascii_case("blank-page") {
+        return &[];
+    }
+    if label.eq_ignore_ascii_case("table") {
+        return TABLE;
+    }
+    if label.eq_ignore_ascii_case("equation-block") {
+        return EQUATION;
+    }
+    if label.eq_ignore_ascii_case("code-block") {
+        return CODE;
+    }
+    if label.eq_ignore_ascii_case("form") {
+        return FORM;
+    }
+    if label.eq_ignore_ascii_case("image")
+        || label.eq_ignore_ascii_case("figure")
+        || label.eq_ignore_ascii_case("diagram")
+    {
+        return IMAGE;
+    }
+    if label.eq_ignore_ascii_case("chemical-block") {
+        return CHEMICAL;
+    }
+    // Text, Section-Header, Caption, Footnote, List-Group, Table-Of-Contents,
+    // Bibliography, Page-Header, Page-Footer, Complex-Block and the plain
+    // `block` fallback.
+    TEXT
+}
+
+#[derive(Default)]
+struct AssetState {
+    files: Vec<String>,
+    warnings: Vec<String>,
+    limit_warned: bool,
+}
+
+fn can_write_asset(state: &mut AssetState, page: u32) -> bool {
+    if state.files.len() < MAX_BLOCK_FILES {
+        return true;
+    }
+    if !state.limit_warned {
+        state.limit_warned = true;
+        state.warnings.push(format!(
+            "page {page}: stopped after {MAX_BLOCK_FILES} block files; remaining blocks stay in JSON"
+        ));
+    }
+    false
+}
+
+fn write_text_asset(
+    output_dir: &Path,
+    stem: &str,
+    file_name: &str,
+    bytes: &[u8],
+    state: &mut AssetState,
+    page: u32,
+) -> Option<String> {
+    if !can_write_asset(state, page) {
+        return None;
+    }
+    let relative = format!("{stem}_blocks/{file_name}");
+    let path = output_dir.join(&relative);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            state
+                .warnings
+                .push(format!("cannot create {}: {error}", parent.display()));
+            return None;
+        }
+    }
+    match std::fs::write(&path, bytes) {
+        Ok(()) => {
+            state.files.push(path.display().to_string());
+            Some(relative)
+        }
+        Err(error) => {
+            state
+                .warnings
+                .push(format!("cannot write {}: {error}", path.display()));
+            None
+        }
+    }
+}
+
+fn write_png_asset(
+    output_dir: &Path,
+    stem: &str,
+    file_name: &str,
+    image: &image::RgbImage,
+    state: &mut AssetState,
+    page: u32,
+) -> Option<String> {
+    if !can_write_asset(state, page) {
+        return None;
+    }
+    let relative = format!("{stem}_blocks/{file_name}");
+    let path = output_dir.join(&relative);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            state
+                .warnings
+                .push(format!("cannot create {}: {error}", parent.display()));
+            return None;
+        }
+    }
+    match image.save(&path) {
+        Ok(()) => {
+            state.files.push(path.display().to_string());
+            Some(relative)
+        }
+        Err(error) => {
+            state
+                .warnings
+                .push(format!("cannot write {}: {error}", path.display()));
+            None
+        }
+    }
+}
+
+/// Build JSON pages and, when requested, crop/typed files for every block.
+/// Layout parsing and file creation are best-effort: a failed crop or write is
+/// a warning, never a failed document.
+fn build_document_output(
+    source_name: &str,
+    stem: &str,
+    output_dir: &Path,
+    pages: &[PageOutput],
+    mode: BlockExtraction,
+) -> DocumentOutput {
+    let mut state = AssetState::default();
+    let mut json_pages = Vec::with_capacity(pages.len());
+    let mut output_pages = Vec::with_capacity(pages.len());
+
+    for page in pages {
+        let page_num = page.page_number.unwrap_or(1);
+        let blocks = parse_layout_blocks(&page.html, page.width, page.height);
+        let needs_crop = mode == BlockExtraction::All
+            || (mode == BlockExtraction::Images
+                && blocks.iter().any(|block| is_image_label(&block.label)));
+        let decoded = if needs_crop {
+            match image::load_from_memory(&page.jpeg) {
+                Ok(decoded) => Some(decoded),
+                Err(error) => {
+                    state.warnings.push(format!(
+                        "page {page_num}: cannot decode the page JPEG for crops: {error}"
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut output_blocks = Vec::with_capacity(blocks.len());
+        let mut chunks = Vec::with_capacity(blocks.len());
+        for (index, block) in blocks.into_iter().enumerate() {
+            let block_id = format!("p{page_num}-{:02}", index + 1);
+            let base = format!(
+                "page-{page_num}-{:02}-{}",
+                index + 1,
+                sanitize_label(&block.label)
+            );
+            let mut assets = ChandraAssets::default();
+
+            let wants_png = mode == BlockExtraction::All
+                || (mode == BlockExtraction::Images && is_image_label(&block.label));
+            if wants_png {
+                if let Some(decoded) = decoded.as_ref() {
+                    match crop_bbox(decoded, block.bbox) {
+                        Some(crop) => {
+                            assets.png = write_png_asset(
+                                output_dir,
+                                stem,
+                                &format!("{base}.png"),
+                                &crop,
+                                &mut state,
+                                page_num,
+                            );
+                        }
+                        None => state.warnings.push(format!(
+                            "page {page_num}: skipped {label} block with invalid or tiny bbox {bbox:?}",
+                            label = block.label,
+                            bbox = block.bbox
+                        )),
+                    }
+                }
+            }
+
+            if mode == BlockExtraction::All {
+                for kind in asset_kinds(&block.label) {
+                    match kind {
+                        AssetKind::Png => {}
+                        AssetKind::Md => {
+                            let markdown = page_to_markdown(&block.content);
+                            if !markdown.trim().is_empty() {
+                                assets.md = write_text_asset(
+                                    output_dir,
+                                    stem,
+                                    &format!("{base}.md"),
+                                    markdown.as_bytes(),
+                                    &mut state,
+                                    page_num,
+                                );
+                            }
+                        }
+                        AssetKind::Html => {
+                            if !block.content.trim().is_empty() {
+                                assets.html = write_text_asset(
+                                    output_dir,
+                                    stem,
+                                    &format!("{base}.html"),
+                                    block.content.as_bytes(),
+                                    &mut state,
+                                    page_num,
+                                );
+                            }
+                        }
+                        AssetKind::Csv => {
+                            if let Some(csv) = table_to_csv(&block.content) {
+                                assets.csv = write_text_asset(
+                                    output_dir,
+                                    stem,
+                                    &format!("{base}.csv"),
+                                    csv.as_bytes(),
+                                    &mut state,
+                                    page_num,
+                                );
+                            }
+                        }
+                        AssetKind::Tex => {
+                            let tex = extract_math_text(&block.content)
+                                .unwrap_or_else(|| block.text.trim().to_string());
+                            if !tex.is_empty() {
+                                assets.tex = write_text_asset(
+                                    output_dir,
+                                    stem,
+                                    &format!("{base}.tex"),
+                                    tex.as_bytes(),
+                                    &mut state,
+                                    page_num,
+                                );
+                            }
+                        }
+                        AssetKind::Txt => {
+                            let text = block.text.trim();
+                            if !text.is_empty() {
+                                assets.txt = write_text_asset(
+                                    output_dir,
+                                    stem,
+                                    &format!("{base}.txt"),
+                                    text.as_bytes(),
+                                    &mut state,
+                                    page_num,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let image = if is_image_label(&block.label) {
+                assets.png.clone()
+            } else {
+                None
+            };
+            chunks.push(ChandraChunk {
+                block_id: block_id.clone(),
+                bbox: block.bbox,
+                label: block.label.clone(),
+                content: block.content.clone(),
+                text: block.text.clone(),
+                assets: assets.clone(),
+                image,
+            });
+            output_blocks.push(OutputBlock {
+                block_id,
+                label: block.label,
+                content: block.content,
+                text: block.text,
+                assets,
+            });
+        }
+
+        json_pages.push(ChandraPage {
+            page_num,
+            page_box: [0, 0, page.width, page.height],
+            chunks,
+        });
+        output_pages.push(OutputPage {
+            page_number: page.page_number,
+            blocks: output_blocks,
+        });
+    }
+
+    DocumentOutput {
+        json: ChandraDocument::new(source_name, json_pages),
+        pages: output_pages,
+        files: state.files,
+        warnings: state.warnings,
+    }
+}
+
+/// Text inside the first/all `<math>` elements, used for `.tex` output.
+fn extract_math_text(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    let mut index = 0;
+    let mut parts = Vec::new();
+    while let Some(relative) = lower[index..].find("<math") {
+        let start = index + relative;
+        let Some(open_end) = content[start..].find('>') else {
+            break;
+        };
+        let inner_start = start + open_end + 1;
+        let Some(close_relative) = lower[inner_start..].find("</math") else {
+            break;
+        };
+        parts.push(ocr_core::html_to_text(
+            &content[inner_start..inner_start + close_relative],
+        ));
+        index = inner_start + close_relative + 6;
+    }
+    let text = parts.join(" ");
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn block_should_embed(mode: BlockExtraction, label: &str) -> bool {
+    match mode {
+        BlockExtraction::None => false,
+        BlockExtraction::Images => is_image_label(label),
+        BlockExtraction::All => true,
+    }
+}
+
+/// Render the final HTML with `<section class="ocr-block">` wrappers and asset
+/// links. The page is still passed through the normal ammonia sanitizer.
+fn render_html_with_blocks(title: &str, pages: &[OutputPage], mode: BlockExtraction) -> String {
+    let page_html: Vec<(Option<u32>, String)> = pages
+        .iter()
+        .map(|page| {
+            let mut html = String::new();
+            for block in &page.blocks {
+                html.push_str(&render_block_html(block, mode));
+            }
+            (page.page_number, html)
+        })
+        .collect();
+    render_html_document(title, &page_html)
+}
+
+fn render_block_html(block: &OutputBlock, mode: BlockExtraction) -> String {
+    if !block_should_embed(mode, &block.label) {
+        return block.content.clone();
+    }
+
+    let mut out = format!(
+        "<section class=\"ocr-block\" id=\"block-{id}\" data-block-id=\"{id}\" data-label=\"{label}\">",
+        id = escape_html(&block.block_id),
+        label = escape_html(&block.label)
+    );
+    let visual = is_visual_label(&block.label);
+    let has_image = visual && block.assets.png.is_some();
+    if has_image {
+        let png = block.assets.png.as_deref().unwrap_or_default();
+        let alt = block_alt(block);
+        out.push_str(&format!(
+            "<figure><img src=\"{}\" alt=\"{}\"/>",
+            asset_url(png),
+            escape_html(&alt)
+        ));
+    } else {
+        out.push_str(&block.content);
+    }
+
+    let links = asset_links_html(&block.assets, if has_image { Some("png") } else { None });
+    if !links.is_empty() {
+        if has_image {
+            out.push_str("<figcaption class=\"ocr-assets\">");
+        } else {
+            out.push_str("<div class=\"ocr-assets\">");
+        }
+        out.push_str(&links.join(" "));
+        if has_image {
+            out.push_str("</figcaption>");
+        } else {
+            out.push_str("</div>");
+        }
+    }
+    if has_image {
+        out.push_str("</figure>");
+    }
+    out.push_str("</section>");
+    out
+}
+
+/// Render Markdown with `<!-- block: … -->` markers and compact asset links.
+fn render_markdown_with_blocks(title: &str, pages: &[OutputPage], mode: BlockExtraction) -> String {
+    let mut out = format!("# {}\n\n", title.trim());
+    for page in pages {
+        if let Some(number) = page.page_number {
+            out.push_str(&format!("<!-- page {number} -->\n\n"));
+        }
+        for block in &page.blocks {
+            let embed = block_should_embed(mode, &block.label);
+            if embed {
+                out.push_str(&format!(
+                    "<!-- block: {} {} -->\n\n",
+                    block.block_id, block.label
+                ));
+            }
+            let visual = is_visual_label(&block.label);
+            let has_image = visual && embed && block.assets.png.is_some();
+            if has_image {
+                let png = block.assets.png.as_deref().unwrap_or_default();
+                out.push_str(&format!(
+                    "![{}]({})\n",
+                    markdown_alt(&block_alt(block)),
+                    asset_url(png)
+                ));
+            } else {
+                let markdown = page_to_markdown(&block.content);
+                if !markdown.is_empty() {
+                    out.push_str(&markdown);
+                    out.push('\n');
+                }
+            }
+            if embed {
+                let links =
+                    asset_links_markdown(&block.assets, if has_image { Some("png") } else { None });
+                if !links.is_empty() {
+                    out.push_str(&links.join(" · "));
+                    out.push('\n');
+                }
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    let mut trimmed = out.trim_end().to_string();
+    trimmed.push('\n');
+    trimmed
+}
+
+fn block_alt(block: &OutputBlock) -> String {
+    let text = block.text.trim();
+    if text.is_empty() {
+        block.label.clone()
+    } else {
+        text.to_string()
+    }
+}
+
+fn markdown_alt(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '[' | ']' | '\\') || ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    let compact = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        "изображение".to_string()
+    } else {
+        compact
+    }
+}
+
+fn asset_label(extension: &str) -> &'static str {
+    match extension {
+        "png" => "PNG",
+        "md" => "MD",
+        "html" => "HTML",
+        "csv" => "CSV",
+        "tex" => "TeX",
+        "txt" => "TXT",
+        _ => "FILE",
+    }
+}
+
+fn asset_links_html(assets: &ChandraAssets, skip: Option<&str>) -> Vec<String> {
+    let mut links = Vec::new();
+    for (extension, path) in [
+        ("png", &assets.png),
+        ("md", &assets.md),
+        ("html", &assets.html),
+        ("csv", &assets.csv),
+        ("tex", &assets.tex),
+        ("txt", &assets.txt),
+    ] {
+        if skip == Some(extension) {
+            continue;
+        }
+        if let Some(path) = path {
+            links.push(format!(
+                "<a class=\"ocr-asset\" href=\"{}\">{}</a>",
+                asset_url(path),
+                asset_label(extension)
+            ));
+        }
+    }
+    links
+}
+
+fn asset_links_markdown(assets: &ChandraAssets, skip: Option<&str>) -> Vec<String> {
+    let mut links = Vec::new();
+    for (extension, path) in [
+        ("png", &assets.png),
+        ("md", &assets.md),
+        ("html", &assets.html),
+        ("csv", &assets.csv),
+        ("tex", &assets.tex),
+        ("txt", &assets.txt),
+    ] {
+        if skip == Some(extension) {
+            continue;
+        }
+        if let Some(path) = path {
+            links.push(format!("[{}]({})", asset_label(extension), asset_url(path)));
+        }
+    }
+    links
+}
+
+/// Percent-encode a relative file path for HTML/Markdown links, keeping `/`
+/// and the RFC 3986 unreserved characters.
+fn asset_url(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Crop a page-pixel bbox, clamping it to the image and rejecting degenerate
+/// or tiny areas. The returned image is RGB (white background for transparency).
+fn crop_bbox(decoded: &image::DynamicImage, bbox: [u32; 4]) -> Option<image::RgbImage> {
+    let width = decoded.width();
+    let height = decoded.height();
+    let x0 = bbox[0].min(width);
+    let y0 = bbox[1].min(height);
+    let x1 = bbox[2].min(width);
+    let y1 = bbox[3].min(height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let crop_width = x1 - x0;
+    let crop_height = y1 - y0;
+    if crop_width < MIN_IMAGE_SIZE || crop_height < MIN_IMAGE_SIZE {
+        return None;
+    }
+    Some(
+        image::DynamicImage::ImageRgba8(
+            image::imageops::crop_imm(decoded, x0, y0, crop_width, crop_height).to_image(),
+        )
+        .to_rgb8(),
+    )
+}
+
+fn prepare_image(path: &Path, max_pixels: u64) -> Result<(Vec<u8>, u32, u32)> {
     // Read only the header first: a 6000x6000 PNG must not allocate its full
     // RGBA bitmap just to be shrunk afterwards.
     let (source_width, source_height) = image::ImageReader::open(path)
@@ -774,7 +1488,7 @@ fn prepare_image(path: &Path, max_pixels: u64) -> Result<Vec<u8>> {
     encoder
         .encode_image(&image)
         .with_context(|| format!("cannot encode {} as JPEG", path.display()))?;
-    Ok(jpeg)
+    Ok((jpeg, image.width(), image.height()))
 }
 
 fn flatten_on_white(image: image::DynamicImage) -> image::RgbImage {
@@ -946,10 +1660,535 @@ mod tests {
         let path = tmp.path().join("test.png");
         let image = image::RgbImage::from_pixel(1000, 500, image::Rgb([255, 0, 0]));
         image.save(&path).unwrap();
-        let jpeg = prepare_image(&path, 300_000).unwrap();
+        let (jpeg, width, height) = prepare_image(&path, 300_000).unwrap();
         assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert!(decoded.width() as u64 * decoded.height() as u64 <= 300_000);
+        assert_eq!((decoded.width(), decoded.height()), (width, height));
+    }
+
+    #[test]
+    fn crops_image_blocks_and_builds_chunks_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut image = image::RgbImage::from_pixel(100, 100, image::Rgb([240, 240, 240]));
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            if (10..50).contains(&x) && (10..50).contains(&y) {
+                *pixel = image::Rgb([40, 80, 200]);
+            }
+        }
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 92)
+            .encode_image(&image)
+            .unwrap();
+
+        let html = r#"<div data-bbox="100 100 500 500" data-label="Image"><img alt="печать"/></div>
+            <div data-bbox="0 0 1000 1000" data-label="Text"><p>Счёт № 1</p></div>"#;
+        let page = PageOutput {
+            page_number: Some(1),
+            html: html.to_string(),
+            jpeg,
+            width: 100,
+            height: 100,
+        };
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page],
+            BlockExtraction::All,
+        );
+        assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+        assert_eq!(output.json.pages[0].page_box, [0, 0, 100, 100]);
+        assert_eq!(output.json.pages[0].chunks[0].block_id, "p1-01");
+        assert_eq!(output.json.pages[0].chunks[0].bbox, [10, 10, 50, 50]);
+        assert_eq!(output.json.pages[0].chunks[0].label, "Image");
+        assert_eq!(
+            output.json.pages[0].chunks[0].image.as_deref(),
+            Some("scan_blocks/page-1-01-image.png")
+        );
+        assert_eq!(
+            output.json.pages[0].chunks[0].assets.png.as_deref(),
+            Some("scan_blocks/page-1-01-image.png")
+        );
+        assert_eq!(
+            output.json.pages[0].chunks[0].assets.txt.as_deref(),
+            Some("scan_blocks/page-1-01-image.txt")
+        );
+        assert_eq!(output.json.pages[0].chunks[1].text, "Счёт № 1");
+        assert_eq!(
+            output.json.pages[0].chunks[1].assets.md.as_deref(),
+            Some("scan_blocks/page-1-02-text.md")
+        );
+        assert!(output.json.pages[0].chunks[1].image.is_none());
+
+        let crop = image::open(tmp.path().join("scan_blocks/page-1-01-image.png")).unwrap();
+        assert_eq!((crop.width(), crop.height()), (40, 40));
+        assert!(tmp.path().join("scan_blocks/page-1-02-text.png").is_file());
+        assert_eq!(output.files.len(), 4, "{:?}", output.files);
+    }
+
+    #[test]
+    fn invalid_or_tiny_image_bbox_is_skipped_but_block_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = image::RgbImage::from_pixel(100, 100, image::Rgb([255, 255, 255]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 92)
+            .encode_image(&image)
+            .unwrap();
+        let html = r#"<div data-bbox="500 500 100 100" data-label="Figure"></div>
+            <div data-bbox="0 0 10 10" data-label="Image"></div>"#;
+        let page = PageOutput {
+            page_number: None,
+            html: html.to_string(),
+            jpeg,
+            width: 100,
+            height: 100,
+        };
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page],
+            BlockExtraction::All,
+        );
+        assert!(output.files.is_empty(), "{:?}", output.files);
+        assert_eq!(output.warnings.len(), 2, "{:?}", output.warnings);
+        assert_eq!(output.json.pages[0].chunks.len(), 2);
+        assert!(output.json.pages[0]
+            .chunks
+            .iter()
+            .all(|chunk| chunk.assets.png.is_none()));
+        assert_eq!(output.json.pages[0].page_num, 1);
+    }
+
+    fn synthetic_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([250, 250, 250]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 92)
+            .encode_image(&image)
+            .unwrap();
+        jpeg
+    }
+
+    fn all_label_fixtures() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("Caption", "<p>Подпись</p>"),
+            ("Footnote", "<p>Сноска</p>"),
+            ("Equation-Block", r#"<p>Формула <math>x^2 + y^2</math></p>"#),
+            ("List-Group", "<ul><li>Первый</li></ul>"),
+            ("Page-Header", "<p>Шапка</p>"),
+            ("Page-Footer", "<p>Низ</p>"),
+            ("Image", r#"<img alt="печать"/>"#),
+            ("Section-Header", "<h2>Раздел</h2>"),
+            (
+                "Table",
+                "<table><tr><th>Товар</th><th>Сумма</th></tr>\
+                 <tr><td>Болт, М8</td><td>100</td></tr></table>",
+            ),
+            ("Text", "<p>Текст</p>"),
+            ("Complex-Block", "<p>Сложный блок</p>"),
+            ("Code-Block", "<pre><code>let x = 1;</code></pre>"),
+            (
+                "Form",
+                r#"<p><input type="checkbox" checked="checked"/> Согласен</p>"#,
+            ),
+            ("Table-Of-Contents", "<p>Оглавление</p>"),
+            ("Figure", r#"<img alt="логотип"/>"#),
+            ("Chemical-Block", "<p><chem>CCO</chem></p>"),
+            ("Diagram", r#"<img alt="схема"/>"#),
+            ("Bibliography", "<p>Источники</p>"),
+            ("Blank-Page", ""),
+        ]
+    }
+
+    fn page_with_all_labels() -> PageOutput {
+        let mut html = String::new();
+        for (index, (label, content)) in all_label_fixtures().into_iter().enumerate() {
+            let y0 = index * 52;
+            html.push_str(&format!(
+                r#"<div data-bbox="0 {y0} 1000 {y1}" data-label="{label}">{content}</div>"#,
+                y1 = y0 + 40
+            ));
+        }
+        PageOutput {
+            page_number: Some(1),
+            html,
+            jpeg: synthetic_jpeg(1000, 1000),
+            width: 1000,
+            height: 1000,
+        }
+    }
+
+    fn expected_extensions(label: &str) -> Vec<&'static str> {
+        asset_kinds(label)
+            .iter()
+            .map(|kind| match kind {
+                AssetKind::Png => "png",
+                AssetKind::Md => "md",
+                AssetKind::Html => "html",
+                AssetKind::Csv => "csv",
+                AssetKind::Tex => "tex",
+                AssetKind::Txt => "txt",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn all_19_labels_map_to_expected_typed_files() {
+        assert_eq!(all_label_fixtures().len(), 19);
+        let mappings: [(&str, &[&str]); 19] = [
+            ("Caption", &["png", "md"]),
+            ("Footnote", &["png", "md"]),
+            ("Equation-Block", &["png", "tex"]),
+            ("List-Group", &["png", "md"]),
+            ("Page-Header", &["png", "md"]),
+            ("Page-Footer", &["png", "md"]),
+            ("Image", &["png", "txt"]),
+            ("Section-Header", &["png", "md"]),
+            ("Table", &["png", "html", "csv"]),
+            ("Text", &["png", "md"]),
+            ("Complex-Block", &["png", "md"]),
+            ("Code-Block", &["png", "txt"]),
+            ("Form", &["png", "html"]),
+            ("Table-Of-Contents", &["png", "md"]),
+            ("Figure", &["png", "txt"]),
+            ("Chemical-Block", &["png", "html", "txt"]),
+            ("Diagram", &["png", "txt"]),
+            ("Bibliography", &["png", "md"]),
+            ("Blank-Page", &[]),
+        ];
+        for (label, expected) in mappings {
+            assert_eq!(expected_extensions(label), expected, "{label}");
+        }
+        assert_eq!(expected_extensions("block"), vec!["png", "md"]);
+    }
+
+    #[test]
+    fn all_mode_creates_png_and_typed_files_for_every_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page_with_all_labels()],
+            BlockExtraction::All,
+        );
+        assert!(output.warnings.is_empty(), "{:?}", output.warnings);
+        assert_eq!(output.json.pages[0].chunks.len(), 18);
+        assert!(output.json.pages[0]
+            .chunks
+            .iter()
+            .all(|chunk| !chunk.label.eq_ignore_ascii_case("blank-page")));
+
+        let mut total_files = 0;
+        for chunk in &output.json.pages[0].chunks {
+            assert!(chunk.block_id.starts_with("p1-"), "{}", chunk.block_id);
+            assert_eq!(chunk.block_id.len(), 5, "{}", chunk.block_id);
+            let expected = expected_extensions(&chunk.label);
+            let actual = asset_values(&chunk.assets)
+                .into_iter()
+                .map(|(extension, _)| extension)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{}", chunk.label);
+            for (extension, path) in asset_values(&chunk.assets) {
+                assert!(
+                    path.starts_with("scan_blocks/page-1-"),
+                    "{path} for {extension}"
+                );
+                assert!(
+                    path.ends_with(&format!(".{extension}")),
+                    "{path} for {extension}"
+                );
+                assert!(tmp.path().join(path).is_file(), "missing {path}");
+                total_files += 1;
+            }
+        }
+        assert_eq!(total_files, 38, "{:?}", output.files);
+        assert_eq!(output.files.len(), 38);
+
+        let by_label = |label: &str| {
+            output.json.pages[0]
+                .chunks
+                .iter()
+                .find(|chunk| chunk.label == label)
+                .unwrap()
+        };
+        let table = by_label("Table");
+        let table_path = tmp.path().join(table.assets.csv.as_deref().unwrap());
+        let csv = std::fs::read_to_string(table_path).unwrap();
+        assert_eq!(csv, "Товар,Сумма\n\"Болт, М8\",100\n");
+        let table_html =
+            std::fs::read_to_string(tmp.path().join(table.assets.html.as_deref().unwrap()))
+                .unwrap();
+        assert!(table_html.contains("<table"), "{table_html}");
+
+        let equation = by_label("Equation-Block");
+        let tex = std::fs::read_to_string(tmp.path().join(equation.assets.tex.as_deref().unwrap()))
+            .unwrap();
+        assert!(tex.contains("x^2 + y^2"), "{tex}");
+
+        let code = by_label("Code-Block");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(code.assets.txt.as_deref().unwrap())).unwrap(),
+            "let x = 1;"
+        );
+
+        let form = by_label("Form");
+        let form_html =
+            std::fs::read_to_string(tmp.path().join(form.assets.html.as_deref().unwrap())).unwrap();
+        assert!(form_html.contains("checkbox"), "{form_html}");
+
+        let image = by_label("Image");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(image.assets.txt.as_deref().unwrap())).unwrap(),
+            "печать"
+        );
+        assert!(image.image.is_some());
+
+        let chemical = by_label("Chemical-Block");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(chemical.assets.txt.as_deref().unwrap()))
+                .unwrap(),
+            "CCO"
+        );
+        assert!(
+            std::fs::read_to_string(tmp.path().join(chemical.assets.html.as_deref().unwrap()))
+                .unwrap()
+                .contains("chem")
+        );
+
+        let section = by_label("Section-Header");
+        assert!(section
+            .assets
+            .md
+            .as_deref()
+            .unwrap()
+            .ends_with("page-1-08-section-header.md"));
+    }
+
+    fn asset_values(assets: &ChandraAssets) -> Vec<(&'static str, &str)> {
+        let mut values = Vec::new();
+        if let Some(path) = assets.png.as_deref() {
+            values.push(("png", path));
+        }
+        if let Some(path) = assets.md.as_deref() {
+            values.push(("md", path));
+        }
+        if let Some(path) = assets.html.as_deref() {
+            values.push(("html", path));
+        }
+        if let Some(path) = assets.csv.as_deref() {
+            values.push(("csv", path));
+        }
+        if let Some(path) = assets.tex.as_deref() {
+            values.push(("tex", path));
+        }
+        if let Some(path) = assets.txt.as_deref() {
+            values.push(("txt", path));
+        }
+        values
+    }
+
+    #[test]
+    fn none_images_and_all_modes_differ() {
+        let tmp = tempfile::tempdir().unwrap();
+        let html = r#"<div data-bbox="0 0 500 500" data-label="Image"><img alt="печать"/></div>
+            <div data-bbox="500 0 1000 500" data-label="Text"><p>Текст</p></div>"#;
+        let page = || PageOutput {
+            page_number: Some(1),
+            html: html.to_string(),
+            jpeg: synthetic_jpeg(100, 100),
+            width: 100,
+            height: 100,
+        };
+
+        let none = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page()],
+            BlockExtraction::None,
+        );
+        assert!(none.files.is_empty());
+        assert!(none.json.pages[0]
+            .chunks
+            .iter()
+            .all(|chunk| chunk.assets.is_empty()));
+
+        let images = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page()],
+            BlockExtraction::Images,
+        );
+        assert_eq!(images.files.len(), 1);
+        let image = &images.json.pages[0].chunks[0];
+        assert!(image.assets.png.is_some());
+        assert!(image.assets.txt.is_none());
+        assert!(images.json.pages[0].chunks[1].assets.is_empty());
+
+        let all = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page()],
+            BlockExtraction::All,
+        );
+        assert!(all.files.len() > images.files.len());
+        assert!(all.json.pages[0].chunks[1].assets.md.is_some());
+        assert!(all.json.pages[0].chunks[1].assets.png.is_some());
+    }
+
+    #[test]
+    fn html_and_markdown_embed_assets_and_block_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let page = page_with_all_labels();
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page],
+            BlockExtraction::All,
+        );
+
+        let html = render_html_with_blocks("scan", &output.pages, BlockExtraction::All);
+        assert!(
+            html.contains(
+                "class=\"ocr-block\" id=\"block-p1-01\" data-block-id=\"p1-01\" \
+                 data-label=\"Caption\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains("class=\"ocr-asset\""), "{html}");
+        assert!(
+            html.contains("href=\"scan_blocks/page-1-01-caption.md\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<img src=\"scan_blocks/page-1-07-image.png\""),
+            "{html}"
+        );
+        assert!(html.contains("alt=\"печать\""), "{html}");
+        assert!(
+            html.contains("href=\"scan_blocks/page-1-09-table.csv\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"scan_blocks/page-1-03-equation-block.tex\""),
+            "{html}"
+        );
+        assert!(!html.contains("data-label=\"Blank-Page\""), "{html}");
+
+        let markdown = render_markdown_with_blocks("scan", &output.pages, BlockExtraction::All);
+        assert!(
+            markdown.contains("<!-- block: p1-01 Caption -->"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[MD](scan_blocks/page-1-01-caption.md)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[PNG](scan_blocks/page-1-01-caption.png)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![печать](scan_blocks/page-1-07-image.png)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[CSV](scan_blocks/page-1-09-table.csv)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[TeX](scan_blocks/page-1-03-equation-block.tex)"),
+            "{markdown}"
+        );
+    }
+
+    #[test]
+    fn images_mode_embeds_only_image_figures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let html = r#"<div data-bbox="0 0 500 500" data-label="Image"><img alt="печать"/></div>
+            <div data-bbox="500 0 1000 500" data-label="Text"><p>Текст</p></div>"#;
+        let page = PageOutput {
+            page_number: Some(1),
+            html: html.to_string(),
+            jpeg: synthetic_jpeg(100, 100),
+            width: 100,
+            height: 100,
+        };
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page],
+            BlockExtraction::Images,
+        );
+        let markdown = render_markdown_with_blocks("scan", &output.pages, BlockExtraction::Images);
+        assert!(
+            markdown.contains("<!-- block: p1-01 Image -->"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("![печать](scan_blocks/page-1-01-image.png)"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("<!-- block: p1-02 Text -->"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("scan_blocks/page-1-02-text"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("Текст"), "{markdown}");
+
+        let html = render_html_with_blocks("scan", &output.pages, BlockExtraction::Images);
+        assert!(html.contains("id=\"block-p1-01\""), "{html}");
+        assert!(!html.contains("id=\"block-p1-02\""), "{html}");
+    }
+
+    #[test]
+    fn none_mode_leaves_markdown_and_html_unwrapped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = build_document_output(
+            "scan.jpg",
+            "scan",
+            tmp.path(),
+            &[page_with_all_labels()],
+            BlockExtraction::None,
+        );
+        let markdown = render_markdown_with_blocks("scan", &output.pages, BlockExtraction::None);
+        assert!(!markdown.contains("<!-- block:"), "{markdown}");
+        assert!(!markdown.contains("ocr-asset"), "{markdown}");
+        assert!(!markdown.contains("scan_blocks"), "{markdown}");
+        let html = render_html_with_blocks("scan", &output.pages, BlockExtraction::None);
+        assert!(!html.contains("ocr-block"), "{html}");
+    }
+
+    #[test]
+    fn math_extraction_and_asset_urls_are_safe() {
+        assert_eq!(
+            extract_math_text(r#"<p><math>x_1</math> и <math>y^2</math></p>"#).as_deref(),
+            Some("x_1 y^2")
+        );
+        assert!(extract_math_text("<p>no math</p>").is_none());
+        assert_eq!(
+            asset_url("scan_blocks/Счет № 1 (копия)_blocks/a b.png"),
+            "scan_blocks/%D0%A1%D1%87%D0%B5%D1%82%20%E2%84%96%201%20%28%D0%BA%D0%BE%D0%BF%D0%B8%D1%8F%29_blocks/a%20b.png"
+        );
+    }
+
+    #[test]
+    fn block_file_limit_stops_with_one_warning() {
+        let mut state = AssetState::default();
+        state.files = vec!["x".to_string(); MAX_BLOCK_FILES];
+        assert!(!can_write_asset(&mut state, 1));
+        assert!(!can_write_asset(&mut state, 1));
+        assert_eq!(state.warnings.len(), 1);
+        assert!(state.warnings[0].contains("2000"));
     }
 
     #[test]
@@ -1039,6 +2278,8 @@ mod tests {
             llama_server: "s".to_string(),
             dpi: None,
             format: "md".to_string(),
+            images: Vec::new(),
+            assets: Vec::new(),
             generated_at: now_rfc3339(),
         }
     }

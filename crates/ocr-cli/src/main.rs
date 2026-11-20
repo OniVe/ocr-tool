@@ -8,8 +8,8 @@ use ocr_app::download::{human_bytes, verify_models, DownloadProgress, MODEL_FILE
 use ocr_app::runtime::{download_runtime, runtime_assets, verify_runtime, RuntimeProgress};
 use ocr_app::{doctor, download_models, preflight, print_doctor, run_job, JobOptions};
 use ocr_core::{
-    default_runtime_dir, resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent,
-    MODEL_ENV, RUNTIME_TAG,
+    default_runtime_dir, resolve_model_dir, BlockExtraction, Device, LogLevel, OutputFormat,
+    ProgressEvent, MODEL_ENV, RUNTIME_TAG,
 };
 
 #[derive(Parser)]
@@ -17,7 +17,7 @@ use ocr_core::{
     name = "ocr-tool",
     version,
     about = "Local OCR for PDF and images (Chandra OCR 2 via llama.cpp)",
-    long_about = "Recognize Russian/English documents locally. Outputs Markdown and/or HTML.\n\
+    long_about = "Recognize Russian/English documents locally. Outputs Markdown, HTML and/or JSON.\n\
                   Requires pdfium, a llama-server build and the Chandra GGUF model; see README."
 )]
 struct Cli {
@@ -49,9 +49,17 @@ struct OcrArgs {
     #[arg(short, long, default_value = "ocr-output")]
     output: PathBuf,
 
-    /// Output format
+    /// Output format: md, html, json, both (md+html) or all (md+html+json)
     #[arg(long, default_value = "both", value_parser = parse_format)]
     format: OutputFormat,
+
+    /// Extract per-block files: none, images (Image/Figure only) or all
+    #[arg(long, default_value = "none", value_parser = parse_extract_blocks)]
+    extract_blocks: BlockExtraction,
+
+    /// Deprecated alias for --extract-blocks images
+    #[arg(long)]
+    extract_images: bool,
 
     /// Device selection; auto tries GPU and falls back to CPU
     #[arg(long, default_value = "auto", value_parser = parse_device)]
@@ -193,6 +201,19 @@ fn parse_format(value: &str) -> Result<OutputFormat, String> {
     value.parse()
 }
 
+fn parse_extract_blocks(value: &str) -> Result<BlockExtraction, String> {
+    value.parse()
+}
+
+/// `--extract-images` is the old boolean alias for `--extract-blocks images`.
+fn effective_extract_blocks(alias: bool, mode: BlockExtraction) -> BlockExtraction {
+    if alias {
+        BlockExtraction::Images
+    } else {
+        mode
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let code = match execute(cli) {
@@ -231,6 +252,7 @@ fn run_ocr(args: OcrArgs) -> Result<i32> {
         max_pixels: args.max_pixels,
         max_tokens: args.max_tokens,
         request_timeout_secs: args.timeout,
+        extract_blocks: effective_extract_blocks(args.extract_images, args.extract_blocks),
     };
 
     // Preflight errors are configuration/user errors -> exit 2.
@@ -669,5 +691,31 @@ mod tests {
             page_progress_label(1, 2, 1, 2),
             "  page 1/2: recognizing..."
         );
+    }
+
+    #[test]
+    fn block_extraction_flags_parse_and_alias_wins() {
+        let cli =
+            Cli::try_parse_from(["ocr-tool", "ocr", "a.png", "--extract-blocks", "all"]).unwrap();
+        match cli.command {
+            Command::Ocr(args) => {
+                assert_eq!(args.extract_blocks, BlockExtraction::All);
+                assert!(!args.extract_images);
+            }
+            _ => panic!("expected ocr"),
+        }
+
+        let cli = Cli::try_parse_from(["ocr-tool", "ocr", "a.png", "--extract-images"]).unwrap();
+        match cli.command {
+            Command::Ocr(args) => {
+                assert_eq!(args.extract_blocks, BlockExtraction::None);
+                assert!(args.extract_images);
+                assert_eq!(
+                    effective_extract_blocks(args.extract_images, args.extract_blocks),
+                    BlockExtraction::Images
+                );
+            }
+            _ => panic!("expected ocr"),
+        }
     }
 }

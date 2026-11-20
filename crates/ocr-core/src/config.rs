@@ -65,8 +65,10 @@ impl FromStr for Device {
 pub enum OutputFormat {
     Md,
     Html,
+    Json,
     #[default]
     Both,
+    All,
 }
 
 impl OutputFormat {
@@ -74,16 +76,28 @@ impl OutputFormat {
         match self {
             OutputFormat::Md => "md",
             OutputFormat::Html => "html",
+            OutputFormat::Json => "json",
             OutputFormat::Both => "both",
+            OutputFormat::All => "all",
         }
     }
 
     pub fn writes_markdown(self) -> bool {
-        matches!(self, OutputFormat::Md | OutputFormat::Both)
+        matches!(
+            self,
+            OutputFormat::Md | OutputFormat::Both | OutputFormat::All
+        )
     }
 
     pub fn writes_html(self) -> bool {
-        matches!(self, OutputFormat::Html | OutputFormat::Both)
+        matches!(
+            self,
+            OutputFormat::Html | OutputFormat::Both | OutputFormat::All
+        )
+    }
+
+    pub fn writes_json(self) -> bool {
+        matches!(self, OutputFormat::Json | OutputFormat::All)
     }
 }
 
@@ -100,9 +114,59 @@ impl FromStr for OutputFormat {
         match value.to_ascii_lowercase().as_str() {
             "md" | "markdown" => Ok(OutputFormat::Md),
             "html" => Ok(OutputFormat::Html),
+            "json" => Ok(OutputFormat::Json),
             "both" => Ok(OutputFormat::Both),
+            "all" => Ok(OutputFormat::All),
             other => Err(format!(
-                "invalid format '{other}' (expected md, html or both)"
+                "invalid format '{other}' (expected md, html, json, both or all)"
+            )),
+        }
+    }
+}
+
+/// How much of each page is saved as crop/typed files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockExtraction {
+    /// Do not write per-block files (JSON is still written when requested).
+    #[default]
+    None,
+    /// Crop only `Image`/`Figure` blocks (the old `--extract-images`).
+    Images,
+    /// Crop every non-blank block and write typed files (md/html/csv/tex/txt).
+    All,
+}
+
+impl BlockExtraction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlockExtraction::None => "none",
+            BlockExtraction::Images => "images",
+            BlockExtraction::All => "all",
+        }
+    }
+
+    pub fn writes_files(self) -> bool {
+        !matches!(self, BlockExtraction::None)
+    }
+}
+
+impl fmt::Display for BlockExtraction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BlockExtraction {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "none" | "off" => Ok(BlockExtraction::None),
+            "images" | "image" => Ok(BlockExtraction::Images),
+            "all" | "blocks" => Ok(BlockExtraction::All),
+            other => Err(format!(
+                "invalid block extraction '{other}' (expected none, images or all)"
             )),
         }
     }
@@ -300,10 +364,37 @@ mod tests {
     #[test]
     fn format_parsing_and_flags() {
         let both: OutputFormat = "both".parse().unwrap();
-        assert!(both.writes_markdown() && both.writes_html());
+        assert!(both.writes_markdown() && both.writes_html() && !both.writes_json());
         let md: OutputFormat = "md".parse().unwrap();
-        assert!(md.writes_markdown() && !md.writes_html());
+        assert!(md.writes_markdown() && !md.writes_html() && !md.writes_json());
+        let json: OutputFormat = "json".parse().unwrap();
+        assert!(!json.writes_markdown() && !json.writes_html() && json.writes_json());
+        let all: OutputFormat = "all".parse().unwrap();
+        assert!(all.writes_markdown() && all.writes_html() && all.writes_json());
+        assert_eq!(all.to_string(), "all");
+        assert_eq!(json.to_string(), "json");
+        assert_eq!(both.to_string(), "both");
         assert!("pdf".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn block_extraction_parsing_and_flags() {
+        assert_eq!(
+            "none".parse::<BlockExtraction>().unwrap(),
+            BlockExtraction::None
+        );
+        assert_eq!(
+            "images".parse::<BlockExtraction>().unwrap(),
+            BlockExtraction::Images
+        );
+        assert_eq!(
+            "all".parse::<BlockExtraction>().unwrap(),
+            BlockExtraction::All
+        );
+        assert!(!BlockExtraction::None.writes_files());
+        assert!(BlockExtraction::Images.writes_files());
+        assert_eq!(BlockExtraction::All.to_string(), "all");
+        assert!("some".parse::<BlockExtraction>().is_err());
     }
 
     #[test]

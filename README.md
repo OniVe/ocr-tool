@@ -3,7 +3,8 @@
 Local OCR for PDF and images (PNG/JPEG/TIFF/WebP/BMP), optimized for Russian
 documents. The app renders pages with PDFium, sends each page to
 [Chandra OCR 2](https://github.com/datalab-to/chandra) served by a local
-`llama-server` (llama.cpp), and writes Markdown and standalone UTF-8 HTML.
+`llama-server` (llama.cpp), and writes Markdown, standalone UTF-8 HTML and/or
+layout JSON.
 
 There is a CLI (`ocr-tool`) and a desktop GUI (`ocr-tool-gui`). Everything runs
 offline after the runtime and model are downloaded.
@@ -110,7 +111,8 @@ independent on purpose — set both to keep everything in one place.
 
 ```
 ocr-tool ocr <inputs...> -o <dir>
-    [--format md|html|both]
+    [--format md|html|json|both|all]
+    [--extract-blocks none|images|all]
     [--device auto|gpu|cpu]
     [--dpi 192]
     [--pages 1-5,7]
@@ -155,14 +157,97 @@ ocr-tool gui
   A failed `runtime download` exits `3`. Both accept `--dir PATH`; the model and
   runtime commands are independent.
 
-Output files are named `<source-stem>.md`, `<source-stem>.html` (or only the
-requested format), with `-2`, `-3` suffixes on collision. Windows device names
-(`CON`, `NUL`, `COM1`, …) get a trailing `_`. Each document gets
-`<stem>_meta.json`; the job merges its documents into `_meta.json` under a file
-lock, so two jobs writing to the same `-o` directory keep both sets of entries.
+Output files are named `<source-stem>.md`, `<source-stem>.html` and
+`<source-stem>.json` (only the requested formats), with `-2`, `-3` suffixes on
+collision. `--format both` keeps md+html (the previous default); `all` writes
+md+html+json; `json` writes only the layout JSON. Windows device names (`CON`,
+`NUL`, `COM1`, …) get a trailing `_`. Each document gets `<stem>_meta.json`;
+the job merges its documents into `_meta.json` under a file lock, so two jobs
+writing to the same `-o` directory keep both sets of entries.
 PDF pages are separated by `<!-- page N -->` in Markdown and
 `<section data-page="N">` in HTML. HTML is sanitized with ammonia and wrapped
 with `<meta charset="utf-8">`, `lang="ru"`.
+
+### JSON, block files and embedding
+
+`<stem>.json` follows Chandra's `_chunks.json` shape (bboxes in page pixels,
+block label, inner HTML) and adds a header, stable block ids and asset paths:
+
+```json
+{
+  "schema": "chandra-json/v1",
+  "source": "contract_ru.pdf",
+  "generator": "ocr-tool",
+  "pages": [{
+    "page_num": 1,
+    "page_box": [0, 0, 2480, 3508],
+    "chunks": [{
+      "block_id": "p1-01",
+      "bbox": [100, 200, 2400, 500],
+      "label": "Text",
+      "content": "<p>…</p>",
+      "text": "…",
+      "assets": {"png": "contract_ru_blocks/page-1-01-text.png",
+                 "md": "contract_ru_blocks/page-1-01-text.md"}
+    }]
+  }]
+}
+```
+
+- The normalized 0–1000 `data-bbox` is converted to page pixels; `page_box` is
+  `[0, 0, width, height]` of the JPEG the model saw (after PDF DPI rendering or
+  image downscaling).
+- `content` is the sanitized inner HTML of the layout div; nested layout
+  attributes are removed. `text` is its plain text (including `img alt`).
+- `block_id` is `p<page>-<NN>`; every top-level block gets one.
+- If the model returned no layout divs, one `block` chunk covers the whole page.
+  `Blank-Page` blocks are skipped.
+- `assets` lists only files that were actually created, relative to the JSON.
+  Invalid or tiny bboxes keep the JSON chunk but produce no PNG.
+
+`--extract-blocks` controls per-block files (default `none`):
+
+| mode | files |
+|---|---|
+| `none` | no per-block files; JSON still has chunks/bbox/text when `--format json\|all` |
+| `images` | PNG crops for `Image`/`Figure` only (the old `--extract-images`) |
+| `all` | PNG for every non-blank block + the typed files below |
+
+`--extract-images` is kept as a deprecated alias for `--extract-blocks images`.
+
+Typed files are written for `all` under `<stem>_blocks/page-<n>-<idx>-<label>.<ext>`:
+
+| label | files |
+|---|---|
+| `Text`, `Section-Header`, `Caption`, `Footnote`, `List-Group`, `Table-Of-Contents`, `Bibliography`, `Page-Header`, `Page-Footer`, `Complex-Block` | `.md`, `.png` |
+| `Table` | `.html` (block HTML), `.csv` (expanded rows), `.png` |
+| `Equation-Block` | `.tex` (text from `<math>`), `.png` |
+| `Code-Block` | `.txt`, `.png` |
+| `Form` | `.html` (inputs/checkboxes), `.png` |
+| `Image`, `Figure`, `Diagram` | `.png`, `.txt` (alt/description) |
+| `Chemical-Block` | `.html`, `.txt` (SMILES/chem text), `.png` |
+| `Blank-Page` | skipped |
+
+CSV uses the first top-level table; `colspan`/`rowspan` are expanded with empty
+cells and fields are RFC 4180 quoted. Nested tables are flattened best-effort.
+PNG crops smaller than 8×8 px or with invalid bboxes are skipped. A document
+stops after 2000 block files with a warning; JSON chunks remain.
+
+When block extraction is enabled, HTML/Markdown are annotated for readability:
+- HTML wraps each embedded block in
+  `<section class="ocr-block" id="block-p1-01" data-block-id="p1-01" data-label="Text">`
+  and adds compact `<a class="ocr-asset">PNG</a>` links; `Image`/`Figure`/`Diagram`
+  get a real `<img src="…png" alt="…">`.
+- Markdown adds `<!-- block: p1-01 Text -->` and asset links; visual blocks use
+  `![alt](…png)`.
+- `images` annotates only `Image`/`Figure`; `none` keeps the previous Markdown
+  and HTML byte-for-byte.
+
+Stamps, logos and signatures are extracted **only when Chandra labels them
+`Image`/`Figure`**. A small stamp may be recognized as `Text`/`Form`, and a
+handwritten signature may become text; there is no guarantee. In `all` mode,
+whatever label the model chose still gets its PNG and typed file. Extracted
+files are listed in `<stem>_meta.json` (`images`, plus `assets` for all files).
 
 ## GUI
 
@@ -217,11 +302,12 @@ required.
   PDFium / Runtime folder overrides. The Runtime folder is the same field as in
   the Runtime panel.
 - Recognition: add files/folder (drag and drop works), output directory,
-  format, device, DPI, page range, PDF password (masked field), recurse toggle;
-  **Recognize** runs in a background thread with progress, per-page status,
-  log, cancel, and “Open output folder”. Cancel kills the request and the
-  `llama-server` process tree; closing the window cancels the job and waits for
-  the sidecar to stop.
+  format (Markdown, HTML, JSON, both, all), device, DPI, page range, PDF
+  password (masked field), recurse toggle and **Block extraction** (off /
+  images only / all blocks). **Recognize** runs in a background thread with
+  progress, per-page status, log, cancel, and “Open output folder” / “Open
+  HTML” / “Open JSON”. Cancel kills the request and the `llama-server` process
+  tree; closing the window cancels the job and waits for the sidecar to stop.
 - **Approximate ETA from the start.** Before the first page finishes the GUI
   shows a deliberately rough estimate: ~12 min per selected page plus ~20 s of
   startup for CPU; ~30 s per page plus ~10 s of startup for GPU. Auto follows
@@ -242,7 +328,8 @@ input ─┬─ image ──────────────► JPEG (downsc
                          temperature=0, max_tokens=4096
                                      │
                      HTML blocks ──► ammonia ──► .html
-                              └────► htmd ─────► .md
+                              ├────► htmd ─────► .md
+                              └────► layout ───► .json (+ _blocks/*.png|md|…)
 ```
 
 - One `llama-server` per job, reused for all pages; it is started on a free
@@ -364,6 +451,10 @@ typical laptops.
   which encryption schemes are supported.
 - Printed/handwritten Russian quality depends on Chandra; stamps, handwriting
   and poor scans can contain errors. Always review financial/legal output.
+- `--extract-blocks images` only crops blocks the model labelled `Image`/`Figure`;
+  stamps or signatures classified as `Text`/`Form` are not cropped. `all` crops
+  whatever label exists, but the PNG is only a rectangle around the model's
+  bbox, not a semantic mask.
 - No batch parallelization: pages are processed sequentially through one server.
 - Linux/macOS were not exercised on hardware in this snapshot; only Windows was
   verified locally. CI files are provided but were not run.

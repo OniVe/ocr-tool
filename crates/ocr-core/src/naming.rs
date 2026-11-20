@@ -36,12 +36,13 @@ impl OutputAllocator {
         if self.used.contains(&stem.to_lowercase()) {
             return true;
         }
-        for suffix in [".md", ".html", "_meta.json"] {
+        for suffix in [".md", ".html", ".json", "_meta.json"] {
             if self.dir.join(format!("{stem}{suffix}")).exists() {
                 return true;
             }
         }
-        false
+        self.dir.join(format!("{stem}_blocks")).is_dir()
+            || self.dir.join(format!("{stem}_images")).is_dir()
     }
 }
 
@@ -94,6 +95,36 @@ pub fn stem_of(path: &Path) -> String {
         .unwrap_or_else(|| "output".to_string())
 }
 
+/// Turn a layout label into a safe, short file-name fragment:
+/// `Figure` → `figure`, `Image (печать)` → `image`, `A/B` → `a-b`.
+pub fn sanitize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut separator = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !out.is_empty() {
+            out.push('-');
+            separator = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.len() > 40 {
+        out.truncate(40);
+        while out.ends_with('-') {
+            out.pop();
+        }
+    }
+    if out.is_empty() {
+        "image".to_string()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +149,14 @@ mod tests {
     fn existing_file_collision_gets_suffix() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("act.html"), b"x").unwrap();
+        let mut alloc = OutputAllocator::new(tmp.path());
+        assert_eq!(alloc.allocate("act"), "act-2");
+    }
+
+    #[test]
+    fn existing_json_collision_gets_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("act.json"), b"x").unwrap();
         let mut alloc = OutputAllocator::new(tmp.path());
         assert_eq!(alloc.allocate("act"), "act-2");
     }
@@ -148,5 +187,19 @@ mod tests {
         assert_eq!(sanitize_stem("COM0"), "COM0");
         assert_eq!(sanitize_stem("console"), "console");
         assert_eq!(sanitize_stem("COM10"), "COM10");
+    }
+
+    #[test]
+    fn image_labels_become_safe_file_fragments() {
+        assert_eq!(sanitize_label("Figure"), "figure");
+        assert_eq!(sanitize_label("IMAGE"), "image");
+        assert_eq!(sanitize_label("Image (печать)"), "image");
+        assert_eq!(sanitize_label("A/B"), "a-b");
+        assert_eq!(sanitize_label("  ...  "), "image");
+        assert_eq!(
+            sanitize_label("очень длинная подпись блока изображения"),
+            "image"
+        );
+        assert!(!sanitize_label("Image: logo?").contains([':', '?']));
     }
 }

@@ -8,7 +8,9 @@
 //! defaults instead of blocking the first run.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
+use ocr_core::BlockExtraction;
 use serde::{Deserialize, Serialize};
 
 /// Last choices the user made on the main screen.
@@ -22,6 +24,12 @@ pub struct GuiPrefs {
     pub device: Option<String>,
     #[serde(default)]
     pub dpi: Option<u32>,
+    /// `none`/`images`/`all`; the newer field.
+    #[serde(default)]
+    pub extract_blocks: Option<String>,
+    /// Legacy boolean kept so older prefs keep working.
+    #[serde(default)]
+    pub extract_images: Option<bool>,
 }
 
 impl GuiPrefs {
@@ -30,6 +38,19 @@ impl GuiPrefs {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    /// Resolve the block extraction mode, migrating the old boolean pref.
+    pub fn extract_blocks(&self) -> BlockExtraction {
+        self.extract_blocks
+            .as_deref()
+            .and_then(|value| BlockExtraction::from_str(value).ok())
+            .or_else(|| {
+                self.extract_images
+                    .filter(|enabled| *enabled)
+                    .map(|_| BlockExtraction::Images)
+            })
+            .unwrap_or(BlockExtraction::None)
     }
 }
 
@@ -105,9 +126,11 @@ mod tests {
         let path = dir.path().join("nested").join("gui-prefs.json");
         let prefs = GuiPrefs {
             output_dir: Some("D:\\сканы\\результат".to_string()),
-            format: Some("html".to_string()),
+            format: Some("all".to_string()),
             device: Some("cpu".to_string()),
             dpi: Some(240),
+            extract_blocks: Some("all".to_string()),
+            extract_images: Some(false),
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
@@ -132,6 +155,22 @@ mod tests {
             ..GuiPrefs::default()
         };
         assert_eq!(prefs.output_dir(), None);
+    }
+
+    #[test]
+    fn extract_mode_prefers_new_field_and_migrates_the_old_boolean() {
+        assert_eq!(GuiPrefs::default().extract_blocks(), BlockExtraction::None);
+        let old = GuiPrefs {
+            extract_images: Some(true),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(old.extract_blocks(), BlockExtraction::Images);
+        let new = GuiPrefs {
+            extract_blocks: Some("all".to_string()),
+            extract_images: Some(true),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(new.extract_blocks(), BlockExtraction::All);
     }
 
     #[test]

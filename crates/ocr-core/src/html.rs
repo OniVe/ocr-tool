@@ -106,8 +106,8 @@ pub fn sanitize_fragment(fragment: &str) -> String {
             "dd",
         ])
         .add_generic_attributes(&[
-            "class", "colspan", "rowspan", "align", "valign", "alt", "href", "type", "checked",
-            "value", "border", "width", "height", "id", "title", "start",
+            "class", "colspan", "rowspan", "align", "valign", "alt", "href", "src", "type",
+            "checked", "value", "border", "width", "height", "id", "title", "start",
         ])
         .add_generic_attribute_prefixes(&["data-"])
         .link_rel(Some("noopener noreferrer"))

@@ -24,8 +24,8 @@ use ocr_app::setup::{
 };
 use ocr_app::{download_models_cancellable, run_job, JobOptions, JobReport};
 use ocr_core::{
-    default_runtime_dir, resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent,
-    MODEL_ENV,
+    default_runtime_dir, resolve_model_dir, BlockExtraction, Device, LogLevel, OutputFormat,
+    ProgressEvent, MODEL_ENV,
 };
 use ocr_engine::DEFAULT_MAX_TOKENS;
 use ocr_pdf::DEFAULT_MAX_PIXELS;
@@ -212,6 +212,7 @@ struct OcrApp {
     inputs: Vec<PathBuf>,
     output_dir: String,
     format: OutputFormat,
+    extract_blocks: BlockExtraction,
     device: Device,
     dpi: u32,
     pages: String,
@@ -294,6 +295,7 @@ impl OcrApp {
             .as_deref()
             .and_then(|value| OutputFormat::from_str(value).ok())
             .unwrap_or(OutputFormat::Both);
+        let extract_blocks = prefs.extract_blocks();
         let device = demo
             .device
             .or_else(|| {
@@ -309,6 +311,7 @@ impl OcrApp {
             inputs: demo.inputs,
             output_dir: output.display().to_string(),
             format,
+            extract_blocks,
             device,
             dpi,
             pages: demo.pages.unwrap_or_default(),
@@ -577,6 +580,7 @@ impl OcrApp {
             max_pixels: self.max_pixels,
             max_tokens: self.max_tokens,
             request_timeout_secs: self.timeout_secs,
+            extract_blocks: self.extract_blocks,
         };
 
         self.running = true;

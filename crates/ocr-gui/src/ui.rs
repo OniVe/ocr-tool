@@ -15,7 +15,7 @@ use egui::{
 
 use ocr_app::runtime::runtime_download_mb;
 use ocr_app::setup::ModelStatus;
-use ocr_core::{Device, OutputFormat};
+use ocr_core::{BlockExtraction, Device, OutputFormat};
 
 use crate::{gui_log, prefs, status_text, FailureKind, OcrApp, StatusPhase};
 
@@ -979,7 +979,9 @@ fn output_card(app: &mut OcrApp, ui: &mut egui::Ui) {
             for (value, label) in [
                 (OutputFormat::Md, "Markdown"),
                 (OutputFormat::Html, "HTML"),
+                (OutputFormat::Json, "JSON"),
                 (OutputFormat::Both, "Оба"),
+                (OutputFormat::All, "Всё"),
             ] {
                 let selected = app.format == value;
                 let text = if selected {
@@ -1002,7 +1004,7 @@ fn output_card(app: &mut OcrApp, ui: &mut egui::Ui) {
                             border(dark)
                         },
                     ))
-                    .min_size(Vec2::new(120.0, 44.0));
+                    .min_size(Vec2::new(104.0, 44.0));
                 if ui.add(button).clicked() {
                     if app.format != value {
                         app.format = value;
@@ -1010,13 +1012,46 @@ fn output_card(app: &mut OcrApp, ui: &mut egui::Ui) {
                     }
                 }
             }
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(format_hint(app.format))
-                    .small()
-                    .color(muted(ui)),
-            );
         });
+        ui.label(
+            RichText::new(format_hint(app.format))
+                .small()
+                .color(muted(ui)),
+        );
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Извлечение блоков").color(muted(ui)));
+            let mut changed = false;
+            egui::ComboBox::from_id_salt("extract-blocks")
+                .selected_text(extract_blocks_label(app.extract_blocks))
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        (BlockExtraction::None, "Выкл"),
+                        (BlockExtraction::Images, "Только рисунки"),
+                        (BlockExtraction::All, "Все блоки"),
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut app.extract_blocks, value, label)
+                            .changed();
+                    }
+                });
+            if changed {
+                app.save_prefs();
+            }
+        });
+        if app.extract_blocks == BlockExtraction::All {
+            ui.colored_label(
+                warn_color(ui.visuals().dark_mode),
+                "Все блоки создадут много файлов: PNG, Markdown/HTML/CSV/TeX/TXT для каждого блока.",
+            );
+        }
+        ui.label(
+            RichText::new(
+                "Рисунки вырезаются только из блоков Image/Figure; при «Все блоки» PNG и \
+                 типизированные файлы создаются для каждого непустого блока.",
+            )
+            .small()
+            .color(muted(ui)),
+        );
     });
 }
 
@@ -1145,6 +1180,7 @@ fn result_card(app: &mut OcrApp, ui: &mut egui::Ui) {
     let dark = ui.visuals().dark_mode;
     let partial = report.documents_failed > 0 || report.pages_failed > 0;
     let html = first_html(&report);
+    let json = first_json(&report);
     card(ui, |ui| {
         if report.cancelled {
             section_title(ui, "Остановлено");
@@ -1234,6 +1270,11 @@ fn result_card(app: &mut OcrApp, ui: &mut egui::Ui) {
             if let Some(html) = html {
                 if big_button(ui, "Открыть HTML").clicked() {
                     app.open_path(&html);
+                }
+            }
+            if let Some(json) = json {
+                if big_button(ui, "Открыть JSON").clicked() {
+                    app.open_path(&json);
                 }
             }
             if big_button(ui, RichText::new("Распознать ещё").strong()).clicked() {
@@ -1607,11 +1648,23 @@ fn device_label(device: Device) -> &'static str {
     }
 }
 
+fn extract_blocks_label(mode: BlockExtraction) -> &'static str {
+    match mode {
+        BlockExtraction::None => "Выкл",
+        BlockExtraction::Images => "Только рисунки",
+        BlockExtraction::All => "Все блоки",
+    }
+}
+
 fn format_hint(format: OutputFormat) -> &'static str {
     match format {
         OutputFormat::Md => "Markdown — для текста, поиска и правок.",
         OutputFormat::Html => "HTML — для чтения в браузере с форматированием.",
+        OutputFormat::Json => {
+            "JSON — блоки с bbox и текстом, как в Chandra chunks; для автоматизации."
+        }
         OutputFormat::Both => "Markdown — для текста, HTML — для просмотра. Сохраняются оба.",
+        OutputFormat::All => "Markdown, HTML и JSON — текст, просмотр в браузере и данные с bbox.",
     }
 }
 
@@ -1832,6 +1885,14 @@ fn first_html(report: &ocr_app::JobReport) -> Option<String> {
         .cloned()
 }
 
+fn first_json(report: &ocr_app::JobReport) -> Option<String> {
+    report
+        .outputs
+        .iter()
+        .find(|path| path.to_ascii_lowercase().ends_with(".json"))
+        .cloned()
+}
+
 /// ETA helper used by the download cards. `started` is reset per file so the
 /// estimate is not polluted by a previous model shard.
 pub(crate) fn download_eta(done: u64, total: u64, started: Option<Instant>) -> Option<Duration> {
@@ -2031,6 +2092,8 @@ impl OcrApp {
             format: Some(self.format.as_str().to_string()),
             device: Some(self.device.as_str().to_string()),
             dpi: Some(self.dpi),
+            extract_blocks: Some(self.extract_blocks.as_str().to_string()),
+            extract_images: Some(self.extract_blocks == BlockExtraction::Images),
         });
     }
 }
@@ -2147,5 +2210,17 @@ mod tests {
         assert!(format_hint(OutputFormat::Both).contains("Markdown"));
         assert!(format_hint(OutputFormat::Html).contains("браузере"));
         assert!(!format_hint(OutputFormat::Md).contains("HTML"));
+        assert!(format_hint(OutputFormat::Json).contains("JSON"));
+        assert!(format_hint(OutputFormat::All).contains("HTML"));
+    }
+
+    #[test]
+    fn extraction_modes_have_human_labels() {
+        assert_eq!(extract_blocks_label(BlockExtraction::None), "Выкл");
+        assert_eq!(
+            extract_blocks_label(BlockExtraction::Images),
+            "Только рисунки"
+        );
+        assert_eq!(extract_blocks_label(BlockExtraction::All), "Все блоки");
     }
 }

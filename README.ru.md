@@ -2,8 +2,9 @@
 
 Локальное OCR для PDF и изображений (PNG/JPEG/TIFF/WebP/BMP) с упором на
 русские документы. PDFium рендерит страницы, локальный `llama-server`
-(llama.cpp) запускает Chandra OCR 2, результат сохраняется в Markdown и
-самостоятельный HTML в UTF-8. Есть CLI (`ocr-tool`) и GUI (`ocr-tool-gui`).
+(llama.cpp) запускает Chandra OCR 2, результат сохраняется в Markdown,
+самостоятельный HTML в UTF-8 и/или JSON с блоками и bbox. Есть CLI
+(`ocr-tool`) и GUI (`ocr-tool-gui`).
 После загрузки runtime и модели всё работает офлайн.
 
 > **Это не один exe.** Нужны: бинарник `ocr-tool` + библиотека PDFium +
@@ -95,7 +96,8 @@ PDFium из `runtime/<os>-<arch>/{llama-*,pdfium}`; в эту же папку к
 
 ```
 ocr-tool ocr <inputs...> -o <dir>
-    [--format md|html|both] [--device auto|gpu|cpu] [--dpi 192]
+    [--format md|html|json|both|all] [--extract-blocks none|images|all]
+    [--device auto|gpu|cpu] [--dpi 192]
     [--pages 1-5,7] [--password PASS] [--model-dir PATH] [--llama-dir PATH]
     [--pdfium PATH] [--recursive] [--json]
     [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
@@ -134,12 +136,97 @@ ocr-tool gui
   если компонента нет; ошибка `runtime download` — код `3`. Обе команды
   принимают `--dir PATH`; модель и runtime ставятся независимо.
 
-Имена: `<stem>.md`, `<stem>.html`; при коллизии — `-2`, `-3`. Зарезервированные
+Имена: `<stem>.md`, `<stem>.html`, `<stem>.json` (только запрошенные форматы);
+при коллизии — `-2`, `-3`. `--format both` сохраняет прежнее поведение
+(md+html), `all` — md+html+json, `json` — только JSON. Зарезервированные
 имена Windows (`CON`, `NUL`, `COM1`, …) получают суффикс `_`. Для каждого
 документа пишется `<stem>_meta.json`, для задания — `_meta.json`; параллельные
 задания в одном `-o` объединяют документы под файловой блокировкой. Страницы PDF
 разделяются `<!-- page N -->` в Markdown и `<section data-page="N">` в HTML.
 HTML очищается ammonia, содержит `<meta charset="utf-8">` и `lang="ru"`.
+
+### JSON, файлы блоков и встраивание
+
+`<stem>.json` повторяет форму официального `_chunks.json` (bbox в пикселях
+страницы, label, внутренний HTML) и добавляет заголовок, стабильные id блоков и
+пути к файлам:
+
+```json
+{
+  "schema": "chandra-json/v1",
+  "source": "contract_ru.pdf",
+  "generator": "ocr-tool",
+  "pages": [{
+    "page_num": 1,
+    "page_box": [0, 0, 2480, 3508],
+    "chunks": [{
+      "block_id": "p1-01",
+      "bbox": [100, 200, 2400, 500],
+      "label": "Text",
+      "content": "<p>…</p>",
+      "text": "…",
+      "assets": {"png": "contract_ru_blocks/page-1-01-text.png",
+                 "md": "contract_ru_blocks/page-1-01-text.md"}
+    }]
+  }]
+}
+```
+
+- Нормализованный `data-bbox` 0–1000 переводится в пиксели; `page_box` —
+  `[0, 0, width, height]` JPEG, который видел модель (после DPI рендера PDF или
+  уменьшения изображения).
+- `content` — очищенный внутренний HTML блока; вложенные `data-bbox`/`data-label`
+  удаляются. `text` — plain text (включая `img alt`).
+- `block_id` — `p<страница>-<NN>`; его получает каждый top-level блок.
+- Если layout-разметки нет, создаётся один блок `block` на всю страницу;
+  `Blank-Page` пропускается.
+- `assets` перечисляет только реально созданные файлы относительно JSON.
+  Невалидный/крошечный bbox оставляет chunk в JSON, но PNG не создаётся.
+
+`--extract-blocks` управляет файлами блоков (по умолчанию `none`):
+
+| режим | файлы |
+|---|---|
+| `none` | файлов блоков нет; JSON с chunks/bbox/text всё равно пишется при `--format json\|all` |
+| `images` | PNG только для `Image`/`Figure` (прежний `--extract-images`) |
+| `all` | PNG каждого непустого блока + типизированные файлы ниже |
+
+`--extract-images` сохранён как устаревший alias для `--extract-blocks images`.
+
+Типизированные файлы для `all` пишутся в
+`<stem>_blocks/page-<n>-<idx>-<label>.<ext>`:
+
+| label | файлы |
+|---|---|
+| `Text`, `Section-Header`, `Caption`, `Footnote`, `List-Group`, `Table-Of-Contents`, `Bibliography`, `Page-Header`, `Page-Footer`, `Complex-Block` | `.md`, `.png` |
+| `Table` | `.html` (HTML блока), `.csv` (развёрнутые строки), `.png` |
+| `Equation-Block` | `.tex` (текст из `<math>`), `.png` |
+| `Code-Block` | `.txt`, `.png` |
+| `Form` | `.html` (inputs/checkboxes), `.png` |
+| `Image`, `Figure`, `Diagram` | `.png`, `.txt` (alt/описание) |
+| `Chemical-Block` | `.html`, `.txt` (SMILES/chem), `.png` |
+| `Blank-Page` | пропускается |
+
+CSV берёт первую top-level таблицу; `colspan`/`rowspan` разворачиваются пустыми
+ячейками, поля экранируются по RFC 4180. Вложенные таблицы уплощаются
+best-effort. PNG меньше 8×8 px или с невалидным bbox пропускается. После 2000
+файлов на документ извлечение останавливается с предупреждением; JSON остаётся.
+
+При включённом извлечении HTML/Markdown размечаются:
+- HTML оборачивает каждый встроенный блок в
+  `<section class="ocr-block" id="block-p1-01" data-block-id="p1-01" data-label="Text">`
+  и добавляет компактные ссылки `<a class="ocr-asset">PNG</a>`;
+  `Image`/`Figure`/`Diagram` получают настоящий `<img src="…png" alt="…">`.
+- Markdown добавляет `<!-- block: p1-01 Text -->` и ссылки на assets;
+  визуальные блоки — `![alt](…png)`.
+- `images` размечает только `Image`/`Figure`; `none` оставляет прежние
+  Markdown/HTML без изменений.
+
+Печати, логотипы и подписи извлекаются **только если Chandra разметила их как
+`Image`/`Figure`**. Мелкая печать может оказаться `Text`/`Form`, а рукописная
+подпись — текстом; гарантии нет. В режиме `all` PNG и типизированный файл
+получает любой label, который выбрала модель. Список файлов пишется в
+`<stem>_meta.json` (`images`, а также `assets` со всеми файлами).
 
 ## GUI
 
@@ -187,12 +274,13 @@ GUI самодостаточен при первом запуске — CLI и �
 - **Advanced paths** разворачивается автоматически, пока setup не завершён
   (нет модели, llama-server или PDFium); остаются опциональные поля Model dir /
   llama dir / PDFium / Runtime folder (то же поле, что в панели Runtime).
-- Распознавание: файлы/папка (можно перетащить), выходная папка, формат,
-  устройство, DPI, диапазон страниц, пароль PDF (скрытое поле), рекурсия;
-  кнопка «Recognize» запускает фоновый поток, есть прогресс, лог, отмена и
-  «Open output folder». Отмена убивает запрос и дерево процессов
-  `llama-server`; закрытие окна отменяет задание и дожидается остановки
-  sidecar.
+- Распознавание: файлы/папка (можно перетащить), выходная папка, формат
+  (Markdown, HTML, JSON, оба, всё), устройство, DPI, диапазон страниц, пароль
+  PDF (скрытое поле), рекурсия и режим **Извлечение блоков** (выкл / только
+  рисунки / все блоки); кнопка «Recognize» запускает фоновый поток, есть
+  прогресс, лог, отмена, «Open output folder», «Open HTML» и «Open JSON».
+  Отмена убивает запрос и дерево процессов `llama-server`; закрытие окна
+  отменяет задание и дожидается остановки sidecar.
 - **Примерное время до окончания с самого начала.** До первой готовой
   страницы GUI показывает намеренно осторожную оценку: ~12 мин на каждую
   выбранную страницу плюс ~20 с на запуск для CPU; ~30 с на страницу плюс
@@ -275,6 +363,10 @@ CPU — аварийный fallback, а не рабочий режим для п
   схем шифрования определяет PDFium.
 - Качество рукописи/печатей/плохих сканов зависит от Chandra; проверяйте
   финансовые и юридические документы вручную.
+- `--extract-blocks images` вырезает только блоки, размеченные моделью как
+  `Image`/`Figure`; печать или подпись, распознанная как `Text`/`Form`, не
+  кропится. `all` вырезает любой label, но PNG — это прямоугольник bbox модели,
+  а не семантическая маска.
 - Страницы обрабатываются последовательно, без параллелизма.
 - Linux/macOS локально не проверялись; CI-конфигурация приложена, но не
   запускалась.

@@ -17,6 +17,12 @@ pub struct DocumentMeta {
     pub llama_server: String,
     pub dpi: Option<u32>,
     pub format: String,
+    /// Extracted PNG crops (absolute paths), when block extraction was enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// All extracted block files (PNGs and typed md/html/csv/tex/txt).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<String>,
     pub generated_at: String,
 }
 
