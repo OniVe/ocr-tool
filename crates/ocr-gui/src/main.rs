@@ -27,7 +27,7 @@ use ocr_core::{
     default_runtime_dir, resolve_model_dir, BlockExtraction, Device, LogLevel, OutputFormat,
     ProgressEvent, MODEL_ENV,
 };
-use ocr_engine::DEFAULT_MAX_TOKENS;
+use ocr_engine::{DEFAULT_IMAGE_MAX_TOKENS, DEFAULT_MAX_TOKENS};
 use ocr_pdf::DEFAULT_MAX_PIXELS;
 
 fn main() -> eframe::Result<()> {
@@ -224,6 +224,10 @@ struct OcrApp {
     runtime_dir: String,
     max_pixels: u64,
     max_tokens: u32,
+    /// Fast/quality profile: 2048 or 4096 vision tokens per image.
+    image_max_tokens: u32,
+    /// PDF pages recognized at the same time (1 or 2).
+    parallel_pages: u32,
     timeout_secs: u64,
 
     running: bool,
@@ -249,6 +253,9 @@ struct OcrApp {
     page_selected_total: u32,
     pages_done: u32,
     page_seconds_total: f64,
+    /// Speed settings of the running job (settings can change between jobs).
+    job_image_max_tokens: u32,
+    job_parallel_pages: u32,
 
     model_status: ModelStatus,
     runtime: RuntimeStatus,
@@ -306,6 +313,8 @@ impl OcrApp {
             })
             .unwrap_or(Device::Auto);
         let dpi = prefs.dpi.unwrap_or(192).clamp(72, 600);
+        let image_max_tokens = prefs.image_max_tokens(DEFAULT_IMAGE_MAX_TOKENS);
+        let parallel_pages = prefs.parallel_pages();
 
         let mut app = Self {
             inputs: demo.inputs,
@@ -323,6 +332,8 @@ impl OcrApp {
             runtime_dir: String::new(),
             max_pixels: DEFAULT_MAX_PIXELS,
             max_tokens: DEFAULT_MAX_TOKENS,
+            image_max_tokens,
+            parallel_pages,
             timeout_secs: 600,
 
             running: false,
@@ -348,6 +359,8 @@ impl OcrApp {
             page_selected_total: 0,
             pages_done: 0,
             page_seconds_total: 0.0,
+            job_image_max_tokens: DEFAULT_IMAGE_MAX_TOKENS,
+            job_parallel_pages: 1,
 
             model_status: ModelStatus::Missing {
                 dir: PathBuf::new(),
@@ -579,6 +592,8 @@ impl OcrApp {
             pdfium: non_empty_path(&self.pdfium),
             max_pixels: self.max_pixels,
             max_tokens: self.max_tokens,
+            image_max_tokens: self.image_max_tokens,
+            parallel_pages: self.parallel_pages,
             request_timeout_secs: self.timeout_secs,
             extract_blocks: self.extract_blocks,
         };
@@ -603,6 +618,8 @@ impl OcrApp {
         self.page_selected_total = 0;
         self.pages_done = 0;
         self.page_seconds_total = 0.0;
+        self.job_image_max_tokens = self.image_max_tokens;
+        self.job_parallel_pages = self.parallel_pages.clamp(1, 2);
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
 

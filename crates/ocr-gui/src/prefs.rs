@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ocr_core::BlockExtraction;
+use ocr_engine::{FAST_IMAGE_MAX_TOKENS, MAX_PARALLEL_PAGES};
 use serde::{Deserialize, Serialize};
 
 /// Last choices the user made on the main screen.
@@ -30,6 +31,16 @@ pub struct GuiPrefs {
     /// Legacy boolean kept so older prefs keep working.
     #[serde(default)]
     pub extract_images: Option<bool>,
+    /// Fast speed profile (2048 image tokens); migrated to/from
+    /// `image_max_tokens`.
+    #[serde(default)]
+    pub fast: Option<bool>,
+    /// Explicit image-token cap (advanced); wins over `fast`.
+    #[serde(default)]
+    pub image_max_tokens: Option<u32>,
+    /// PDF pages in flight: 1 or 2.
+    #[serde(default)]
+    pub parallel_pages: Option<u32>,
 }
 
 impl GuiPrefs {
@@ -51,6 +62,24 @@ impl GuiPrefs {
                     .map(|_| BlockExtraction::Images)
             })
             .unwrap_or(BlockExtraction::None)
+    }
+
+    /// Resolve the image-token budget. An explicit value wins; otherwise the
+    /// `fast` flag maps to 2048 and the quality default is 4096. This also
+    /// migrates a prefs file that only knows one of the two fields.
+    pub fn image_max_tokens(&self, quality_default: u32) -> u32 {
+        match self.image_max_tokens {
+            Some(value) if (1..=4096).contains(&value) => value,
+            _ if self.fast.unwrap_or(false) => FAST_IMAGE_MAX_TOKENS,
+            _ => quality_default,
+        }
+    }
+
+    /// PDF pages in flight, clamped to the supported 1..=2 range.
+    pub fn parallel_pages(&self) -> u32 {
+        self.parallel_pages
+            .unwrap_or(1)
+            .clamp(1, MAX_PARALLEL_PAGES)
     }
 }
 
@@ -131,6 +160,9 @@ mod tests {
             dpi: Some(240),
             extract_blocks: Some("all".to_string()),
             extract_images: Some(false),
+            fast: Some(true),
+            image_max_tokens: Some(2048),
+            parallel_pages: Some(2),
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
@@ -171,6 +203,44 @@ mod tests {
             ..GuiPrefs::default()
         };
         assert_eq!(new.extract_blocks(), BlockExtraction::All);
+    }
+
+    #[test]
+    fn speed_prefs_default_to_quality_and_one_page() {
+        let prefs = GuiPrefs::default();
+        assert_eq!(prefs.image_max_tokens(4096), 4096);
+        assert_eq!(prefs.parallel_pages(), 1);
+    }
+
+    #[test]
+    fn speed_prefs_migrate_fast_and_clamp_parallel_pages() {
+        let old = GuiPrefs {
+            fast: Some(true),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(old.image_max_tokens(4096), 2048);
+
+        let explicit = GuiPrefs {
+            fast: Some(true),
+            image_max_tokens: Some(3072),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(
+            explicit.image_max_tokens(4096),
+            3072,
+            "an explicit advanced value wins over the fast flag"
+        );
+
+        let clamped = GuiPrefs {
+            parallel_pages: Some(9),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(clamped.parallel_pages(), 2);
+        let zero = GuiPrefs {
+            parallel_pages: Some(0),
+            ..GuiPrefs::default()
+        };
+        assert_eq!(zero.parallel_pages(), 1);
     }
 
     #[test]

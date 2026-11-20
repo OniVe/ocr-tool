@@ -19,6 +19,18 @@ pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 pub const DEFAULT_CONTEXT_SIZE: u32 = 10_000;
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Quality profile: the full image-token budget the model was trained for.
+pub const DEFAULT_IMAGE_MAX_TOKENS: u32 = 4096;
+/// Fast profile: fewer vision tokens, faster prefill, but table rows can shift.
+pub const FAST_IMAGE_MAX_TOKENS: u32 = 2048;
+pub const DEFAULT_PARALLEL_PAGES: u32 = 1;
+pub const MAX_PARALLEL_PAGES: u32 = 2;
+/// Total context used with `-np 2`: two slots of 10k tokens.
+pub const PARALLEL_CONTEXT_SIZE: u32 = 20_000;
+/// llama-server reads this variable for `--image-max-tokens`. Passing it as an
+/// environment variable keeps the command line compatible with older builds
+/// that do not know the flag yet.
+pub const IMAGE_MAX_TOKENS_ENV: &str = "LLAMA_ARG_IMAGE_MAX_TOKENS";
 /// Older llama-server log files kept in `%TEMP%/ocr-tool`.
 const KEEP_LOG_FILES: usize = 20;
 
@@ -29,6 +41,10 @@ pub struct EngineConfig {
     pub device: Device,
     pub context_size: u32,
     pub max_tokens: u32,
+    /// Maximum vision tokens per image (`LLAMA_ARG_IMAGE_MAX_TOKENS`).
+    pub image_max_tokens: u32,
+    /// Requests in flight; 1..=2. Two slots need a larger context.
+    pub parallel_pages: u32,
     pub startup_timeout: Duration,
     pub request_timeout: Duration,
 }
@@ -41,9 +57,62 @@ impl EngineConfig {
             device: Device::Auto,
             context_size: DEFAULT_CONTEXT_SIZE,
             max_tokens: DEFAULT_MAX_TOKENS,
+            image_max_tokens: DEFAULT_IMAGE_MAX_TOKENS,
+            parallel_pages: DEFAULT_PARALLEL_PAGES,
             startup_timeout: STARTUP_TIMEOUT,
             request_timeout: REQUEST_TIMEOUT,
         }
+    }
+
+    pub fn effective_parallel_pages(&self) -> u32 {
+        self.parallel_pages.clamp(1, MAX_PARALLEL_PAGES)
+    }
+
+    /// `-c` for the sidecar: two slots need the doubled total context.
+    pub fn effective_context_size(&self) -> u32 {
+        if self.effective_parallel_pages() > 1 {
+            self.context_size.max(PARALLEL_CONTEXT_SIZE)
+        } else {
+            self.context_size
+        }
+    }
+
+    pub fn effective_image_max_tokens(&self) -> u32 {
+        self.image_max_tokens.max(1)
+    }
+}
+
+/// Pure description of the tuning flags/env passed to `llama-server`.
+///
+/// Kept separate from process spawning so the exact `-np`/`-c`/image-token
+/// values can be asserted in unit tests without launching a sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerTuning {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub context_size: u32,
+    pub parallel_pages: u32,
+    pub image_max_tokens: u32,
+}
+
+pub fn server_tuning(config: &EngineConfig) -> ServerTuning {
+    let parallel_pages = config.effective_parallel_pages();
+    let context_size = config.effective_context_size();
+    let image_max_tokens = config.effective_image_max_tokens();
+    ServerTuning {
+        args: vec![
+            "-c".to_string(),
+            context_size.to_string(),
+            "-np".to_string(),
+            parallel_pages.to_string(),
+        ],
+        env: vec![(
+            IMAGE_MAX_TOKENS_ENV.to_string(),
+            image_max_tokens.to_string(),
+        )],
+        context_size,
+        parallel_pages,
+        image_max_tokens,
     }
 }
 
@@ -190,14 +259,13 @@ impl OcrServer {
         // A unique alias lets us prove that the process answering on `port` is
         // ours and not another program that won the free-port race.
         let alias = format!("ocr-tool-{}-{}-{port}", std::process::id(), next_alias_id());
+        let tuning = server_tuning(config);
         let mut command = Command::new(&candidate.exe);
+        command.arg("-m").arg(&model).arg("--mmproj").arg(&mmproj);
+        for arg in &tuning.args {
+            command.arg(arg);
+        }
         command
-            .arg("-m")
-            .arg(&model)
-            .arg("--mmproj")
-            .arg(&mmproj)
-            .arg("-c")
-            .arg(config.context_size.to_string())
             .arg("-ngl")
             .arg(if candidate.device == Device::Cpu {
                 "0"
@@ -216,6 +284,13 @@ impl OcrServer {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
+        for (key, value) in &tuning.env {
+            command.env(key, value);
+        }
+        log(&format!(
+            "llama-server tuning: -c {} -np {}, image tokens {} ({IMAGE_MAX_TOKENS_ENV})",
+            tuning.context_size, tuning.parallel_pages, tuning.image_max_tokens
+        ));
 
         if let Some(parent) = candidate.exe.parent() {
             command.current_dir(parent);
@@ -1000,6 +1075,82 @@ fn kill_child_tree(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_tuning_is_quality_and_single_slot() {
+        let config = EngineConfig::new("models");
+        let tuning = server_tuning(&config);
+        assert_eq!(tuning.parallel_pages, 1);
+        assert_eq!(tuning.context_size, DEFAULT_CONTEXT_SIZE);
+        assert_eq!(tuning.image_max_tokens, DEFAULT_IMAGE_MAX_TOKENS);
+        assert_eq!(
+            tuning.args,
+            vec![
+                "-c".to_string(),
+                "10000".to_string(),
+                "-np".to_string(),
+                "1".to_string()
+            ]
+        );
+        assert_eq!(
+            tuning.env,
+            vec![(
+                IMAGE_MAX_TOKENS_ENV.to_string(),
+                DEFAULT_IMAGE_MAX_TOKENS.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn parallel_tuning_doubles_context_and_uses_two_slots() {
+        let mut config = EngineConfig::new("models");
+        config.parallel_pages = 2;
+        let tuning = server_tuning(&config);
+        assert_eq!(tuning.parallel_pages, 2);
+        assert_eq!(tuning.context_size, PARALLEL_CONTEXT_SIZE);
+        assert_eq!(
+            tuning.args,
+            vec![
+                "-c".to_string(),
+                "20000".to_string(),
+                "-np".to_string(),
+                "2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_pages_are_clamped_to_one_or_two() {
+        let mut config = EngineConfig::new("models");
+        config.parallel_pages = 0;
+        assert_eq!(config.effective_parallel_pages(), 1);
+        assert_eq!(server_tuning(&config).parallel_pages, 1);
+
+        config.parallel_pages = 9;
+        assert_eq!(config.effective_parallel_pages(), MAX_PARALLEL_PAGES);
+        assert_eq!(server_tuning(&config).parallel_pages, 2);
+    }
+
+    #[test]
+    fn fast_tuning_sets_the_image_token_env() {
+        let mut config = EngineConfig::new("models");
+        config.image_max_tokens = FAST_IMAGE_MAX_TOKENS;
+        let tuning = server_tuning(&config);
+        assert_eq!(tuning.image_max_tokens, FAST_IMAGE_MAX_TOKENS);
+        assert_eq!(
+            tuning.env,
+            vec![(
+                IMAGE_MAX_TOKENS_ENV.to_string(),
+                FAST_IMAGE_MAX_TOKENS.to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn ocr_server_can_be_shared_by_two_page_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<OcrServer>();
+    }
 
     #[test]
     fn device_names_infer_cpu_from_directory() {

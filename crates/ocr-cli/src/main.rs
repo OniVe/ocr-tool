@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use ocr_app::download::{human_bytes, verify_models, DownloadProgress, MODEL_FILES};
 use ocr_app::runtime::{download_runtime, runtime_assets, verify_runtime, RuntimeProgress};
 use ocr_app::{doctor, download_models, preflight, print_doctor, run_job, JobOptions};
+use ocr_app::{DEFAULT_IMAGE_MAX_TOKENS, FAST_IMAGE_MAX_TOKENS};
 use ocr_core::{
     default_runtime_dir, resolve_model_dir, BlockExtraction, Device, LogLevel, OutputFormat,
     ProgressEvent, MODEL_ENV, RUNTIME_TAG,
@@ -100,6 +101,19 @@ struct OcrArgs {
     /// Maximum generated tokens per page
     #[arg(long, default_value_t = 4096)]
     max_tokens: u32,
+
+    /// Fast profile: 2048 image tokens instead of 4096 (~15% faster; table
+    /// rows can shift). Overrides --image-max-tokens.
+    #[arg(long)]
+    fast: bool,
+
+    /// Maximum vision tokens per image (advanced; 2048 = fast, 4096 = quality)
+    #[arg(long)]
+    image_max_tokens: Option<u32>,
+
+    /// Recognize PDF pages in pairs (1 or 2); 2 raises throughput on GPU
+    #[arg(long, default_value_t = 1)]
+    parallel_pages: u32,
 
     /// Per-page HTTP timeout in seconds
     #[arg(long, default_value_t = 600)]
@@ -214,6 +228,15 @@ fn effective_extract_blocks(alias: bool, mode: BlockExtraction) -> BlockExtracti
     }
 }
 
+/// `--fast` wins over the advanced `--image-max-tokens` value.
+fn effective_image_max_tokens(fast: bool, explicit: Option<u32>) -> u32 {
+    if fast {
+        FAST_IMAGE_MAX_TOKENS
+    } else {
+        explicit.unwrap_or(DEFAULT_IMAGE_MAX_TOKENS)
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let code = match execute(cli) {
@@ -251,6 +274,8 @@ fn run_ocr(args: OcrArgs) -> Result<i32> {
         pdfium: args.pdfium,
         max_pixels: args.max_pixels,
         max_tokens: args.max_tokens,
+        image_max_tokens: effective_image_max_tokens(args.fast, args.image_max_tokens),
+        parallel_pages: args.parallel_pages,
         request_timeout_secs: args.timeout,
         extract_blocks: effective_extract_blocks(args.extract_images, args.extract_blocks),
     };
@@ -714,6 +739,76 @@ mod tests {
                     effective_extract_blocks(args.extract_images, args.extract_blocks),
                     BlockExtraction::Images
                 );
+            }
+            _ => panic!("expected ocr"),
+        }
+    }
+
+    #[test]
+    fn fast_profile_maps_to_2048_and_overrides_explicit_tokens() {
+        let cli = Cli::try_parse_from(["ocr-tool", "ocr", "a.pdf", "--fast"]).unwrap();
+        match cli.command {
+            Command::Ocr(args) => {
+                assert!(args.fast);
+                assert_eq!(
+                    effective_image_max_tokens(args.fast, args.image_max_tokens),
+                    FAST_IMAGE_MAX_TOKENS
+                );
+            }
+            _ => panic!("expected ocr"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "ocr-tool",
+            "ocr",
+            "a.pdf",
+            "--fast",
+            "--image-max-tokens",
+            "4096",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Ocr(args) => assert_eq!(
+                effective_image_max_tokens(args.fast, args.image_max_tokens),
+                FAST_IMAGE_MAX_TOKENS,
+                "--fast must win over an explicit token count"
+            ),
+            _ => panic!("expected ocr"),
+        }
+    }
+
+    #[test]
+    fn quality_is_the_default_and_advanced_tokens_are_honored() {
+        let cli = Cli::try_parse_from(["ocr-tool", "ocr", "a.pdf"]).unwrap();
+        match cli.command {
+            Command::Ocr(args) => {
+                assert!(!args.fast);
+                assert_eq!(args.parallel_pages, 1);
+                assert_eq!(
+                    effective_image_max_tokens(args.fast, args.image_max_tokens),
+                    DEFAULT_IMAGE_MAX_TOKENS
+                );
+            }
+            _ => panic!("expected ocr"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "ocr-tool",
+            "ocr",
+            "a.pdf",
+            "--image-max-tokens",
+            "2048",
+            "--parallel-pages",
+            "2",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Ocr(args) => {
+                assert_eq!(
+                    effective_image_max_tokens(args.fast, args.image_max_tokens),
+                    2048
+                );
+                assert_eq!(args.parallel_pages, 2);
             }
             _ => panic!("expected ocr"),
         }

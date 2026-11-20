@@ -120,6 +120,7 @@ ocr-tool ocr <inputs...> -o <dir>
     [--model-dir PATH] [--llama-dir PATH] [--pdfium PATH]
     [--recursive] [--json]
     [--max-pixels N] [--max-tokens N] [--timeout SECONDS]
+    [--fast | --image-max-tokens N] [--parallel-pages 1|2]
 
 ocr-tool doctor [--model-dir PATH] [--llama-dir PATH] [--json]
 ocr-tool models download [--dir PATH] [--force]
@@ -156,6 +157,30 @@ ocr-tool gui
   checks an installed folder offline; it exits `2` when a component is missing.
   A failed `runtime download` exits `3`. Both accept `--dir PATH`; the model and
   runtime commands are independent.
+
+### Speed profiles
+
+- **Quality (default):** 4096 image tokens, one page at a time. Best table and
+  small-text fidelity. On the RTX 3060 CUDA reference it measured **19.65 s**
+  per A4 page.
+- **Fast:** `--fast` (same as `--image-max-tokens 2048`). Image prefill drops
+  from 4.1 s to 1.7 s and the page from **19.65 s to 16.53 s (−16%)**; the
+  invoice spot check kept its key fields. Other documents can differ: on a
+  two-page contract the fast output changed one order/date line, so Quality
+  stays the default for legal and financial work. Caveat: table labels such as
+  `БИК` / `Сч. №` can shift one row down, so verify bank and table data before
+  using it for form automation. `--image-max-tokens N` accepts 1–4096 for
+  experiments; `--fast` wins when both are given. The token cap is passed to
+  llama-server as `LLAMA_ARG_IMAGE_MAX_TOKENS`, which also works with builds
+  that lack the command-line flag.
+- **Two pages at once:** `--parallel-pages 2` starts `llama-server` with
+  `-np 2 -c 20000` and recognizes PDF pages in pairs. On the same CUDA
+  reference it measured **13.18 s/page** at 4096 image tokens and
+  **10.22 s/page** at 2048 (two pages in 20.4 s at 5.1 GB VRAM): a 1.5–1.9×
+  throughput gain for multi-page PDFs. A single page is not faster, because one
+  request still occupies one slot; output pages stay in document order. On CPU
+  both requests share the same cores, so expect little or no speedup. Images
+  (non-PDF inputs) are always recognized one at a time.
 
 Output files are named `<source-stem>.md`, `<source-stem>.html` and
 `<source-stem>.json` (only the requested formats), with `-2`, `-3` suffixes on
@@ -304,18 +329,23 @@ required.
 - Recognition: add files/folder (drag and drop works), output directory,
   format (Markdown, HTML, JSON, both, all), device, DPI, page range, PDF
   password (masked field), recurse toggle and **Block extraction** (off /
-  images only / all blocks). **Recognize** runs in a background thread with
-  progress, per-page status, log, cancel, and “Open output folder” / “Open
-  HTML” / “Open JSON”. Cancel kills the request and the `llama-server` process
-  tree; closing the window cancels the job and waits for the sidecar to stop.
+  images only / all blocks). A **Speed** card selects **Quality** (4096 image
+  tokens) or **Fast** (2048; ~15% faster, table rows may shift) and the
+  **2 pages at once (PDF; GPU)** option. **Recognize** runs in a background
+  thread with progress, per-page status, log, cancel, and “Open output folder” /
+  “Open HTML” / “Open JSON”. Cancel kills the request and the `llama-server`
+  process tree; closing the window cancels the job and waits for the sidecar to
+  stop.
 - **Approximate ETA from the start.** Before the first page finishes the GUI
   shows a deliberately rough estimate: ~12 min per selected page plus ~20 s of
-  startup for CPU; ~30 s per page plus ~10 s of startup for GPU. Auto follows
+  startup for CPU (Fast: ~10 min per page); ~30 s per page plus ~10 s of startup
+  for GPU (Fast: ~25 s). With two pages at once the ETA counts chunks of two,
+  because throughput rises while one-page latency does not. Auto follows
   runtime discovery: the GPU estimate when a GPU candidate is present, otherwise
-  the cautious CPU estimate. After pages complete it
-  switches to the measured average. For multi-file jobs the label names the
-  current file only; while the page count is still unknown no ETA is shown.
-  This is an estimate, not a promise of exact timing.
+  the cautious CPU estimate. After pages complete it switches to the measured
+  average. For multi-file jobs the label names the current file only; while the
+  page count is still unknown no ETA is shown. This is an estimate, not a
+  promise of exact timing.
 
 ## How it works
 
@@ -337,7 +367,9 @@ input ─┬─ image ──────────────► JPEG (downsc
   killed with `taskkill /T /F` and a kill-on-close Windows job object (Unix: a
   process group plus `PR_SET_PDEATHSIG`) on Drop/cancel/crash. `/props` or
   `/v1/models` must confirm the alias or model path before the server is
-  accepted, so a process that wins the free-port race is detected.
+  accepted, so a process that wins the free-port race is detected. The sidecar
+  always gets `-np 1` or `-np 2`; two slots use `-c 20000`, and the vision token
+  budget is passed as `LLAMA_ARG_IMAGE_MAX_TOKENS`.
 - `--device auto` tries the Vulkan/Metal build first and automatically falls back
   to the CPU build if startup fails. With `--llama-dir` pointing at a parent of
   `llama-vulkan` and `llama-cpu`, both builds are enumerated.
@@ -423,8 +455,12 @@ file log, and the offline `runtime --help` / `runtime verify` commands.
 Reference machine: RTX 3060 12 GB, Vulkan b12535, Q4_K_M.
 
 - GPU: roughly **20–50 s per A4 page** (image prompt processing dominates).
-  Measured locally: the 2496×3508 invoice page took **25–27 s**; two A4 contract
-  pages took **43–48 s** after a ~7 s engine start.
+  Measured locally with Vulkan: the 2496×3508 invoice page took **25–27 s**; two
+  A4 contract pages took **43–48 s** after a ~7 s engine start.
+- CUDA reference (WSL2, same GPU/model): **19.65 s/page** in Quality,
+  **16.53 s/page** with Fast, **13.18 s/page** with two pages at once (4096
+  image tokens) and **10.22 s/page** with Fast + two pages. Two-page mode used
+  ~5.1 GB VRAM. CUDA was 4–14% faster than Vulkan on warm jobs, not 2×.
 - CPU: approximately **3.3 generated tokens/s**; a normal page can take
   **10–15 minutes**. A 1248×351 crop with 96 output tokens completed in
   **39–45 s** (plus engine startup). Use `--pages`, `--dpi 120`, or a crop for
@@ -455,7 +491,11 @@ typical laptops.
   stamps or signatures classified as `Text`/`Form` are not cropped. `all` crops
   whatever label exists, but the PNG is only a rectangle around the model's
   bbox, not a semantic mask.
-- No batch parallelization: pages are processed sequentially through one server.
+- Fast mode (2048 image tokens) can move table labels one row down. It is a
+  speed profile, not a table-fidelity guarantee; review bank details and totals.
+- `--parallel-pages 2` overlaps requests, not PDF rendering, and needs roughly
+  5 GB of VRAM. It does not make a single page faster and may not help on CPU.
+  Images (non-PDF inputs) are still processed one at a time.
 - Linux/macOS were not exercised on hardware in this snapshot; only Windows was
   verified locally. CI files are provided but were not run.
 - The GUI and CLI download both the model and the runtime (llama-server +

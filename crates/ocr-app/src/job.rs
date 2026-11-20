@@ -13,7 +13,10 @@ use ocr_core::{
     ChandraAssets, ChandraChunk, ChandraDocument, ChandraPage, DocumentMeta, JobMeta, ModelPaths,
     OutputAllocator, OutputFormat, ProgressEvent, MODEL_ENV,
 };
-use ocr_engine::{inspect_candidates, EngineConfig, OcrServer};
+use ocr_engine::{
+    inspect_candidates, EngineConfig, OcrServer, DEFAULT_IMAGE_MAX_TOKENS, DEFAULT_PARALLEL_PAGES,
+    MAX_PARALLEL_PAGES,
+};
 use ocr_pdf::{PdfRenderer, RenderOptions, DEFAULT_DPI};
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -38,9 +41,24 @@ pub struct JobOptions {
     pub pdfium: Option<PathBuf>,
     pub max_pixels: u64,
     pub max_tokens: u32,
+    /// Maximum vision tokens per image (2048 = fast, 4096 = quality).
+    pub image_max_tokens: u32,
+    /// PDF pages recognized at the same time; useful values are 1 and 2.
+    pub parallel_pages: u32,
     pub request_timeout_secs: u64,
     /// Write per-block crops and typed files (`none`/`images`/`all`).
     pub extract_blocks: BlockExtraction,
+}
+
+impl JobOptions {
+    pub fn effective_parallel_pages(&self) -> u32 {
+        self.parallel_pages.clamp(1, MAX_PARALLEL_PAGES)
+    }
+
+    /// Fast means a reduced image-token budget; max output tokens are separate.
+    pub fn is_fast(&self) -> bool {
+        self.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS
+    }
 }
 
 impl Default for JobOptions {
@@ -59,6 +77,8 @@ impl Default for JobOptions {
             pdfium: None,
             max_pixels: ocr_pdf::DEFAULT_MAX_PIXELS,
             max_tokens: ocr_engine::DEFAULT_MAX_TOKENS,
+            image_max_tokens: DEFAULT_IMAGE_MAX_TOKENS,
+            parallel_pages: DEFAULT_PARALLEL_PAGES,
             request_timeout_secs: 600,
             extract_blocks: BlockExtraction::None,
         }
@@ -115,6 +135,12 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     }
     if options.max_tokens == 0 {
         bail!("invalid --max-tokens 0");
+    }
+    if !(1..=4096).contains(&options.image_max_tokens) {
+        bail!(
+            "invalid --image-max-tokens {} (expected 1..=4096; use 2048 for the fast profile)",
+            options.image_max_tokens
+        );
     }
     if options.max_pixels == 0 {
         bail!("invalid --max-pixels 0");
@@ -207,7 +233,14 @@ pub fn preflight(options: &JobOptions) -> Result<PreparedJob> {
     let mut engine_config = EngineConfig::new(&model_dir);
     engine_config.device = options.device;
     engine_config.llama_dir = options.llama_dir.clone();
-    let (candidates, searched, warnings) = inspect_candidates(&engine_config);
+    let (candidates, searched, mut warnings) = inspect_candidates(&engine_config);
+    if options.parallel_pages != options.effective_parallel_pages() {
+        warnings.push(format!(
+            "--parallel-pages {} clamped to {} (maximum {MAX_PARALLEL_PAGES})",
+            options.parallel_pages,
+            options.effective_parallel_pages()
+        ));
+    }
     if candidates.is_empty() {
         bail!(
             "llama-server executable not found (device {}). Set OCR_LLAMA_SERVER, pass \
@@ -283,6 +316,8 @@ pub fn run_job(
     let mut engine_config = EngineConfig::new(&prepared.model_dir);
     engine_config.device = options.device;
     engine_config.max_tokens = options.max_tokens;
+    engine_config.image_max_tokens = options.image_max_tokens;
+    engine_config.parallel_pages = options.effective_parallel_pages();
     engine_config.request_timeout = Duration::from_secs(options.request_timeout_secs.max(1));
     engine_config.llama_dir = options.llama_dir.clone();
 
@@ -309,6 +344,32 @@ pub fn run_job(
             level: ocr_core::LogLevel::Warning,
             message: "GPU llama-server unavailable; continuing on CPU (slow)".to_string(),
         });
+    }
+    if options.is_fast() {
+        events(ProgressEvent::Log {
+            level: ocr_core::LogLevel::Warning,
+            message: format!(
+                "fast profile: {} image tokens instead of {}; table rows can shift, \
+                 verify bank/table fields",
+                options.image_max_tokens, DEFAULT_IMAGE_MAX_TOKENS
+            ),
+        });
+    }
+    if options.effective_parallel_pages() > 1 {
+        let parallel = options.effective_parallel_pages();
+        events(ProgressEvent::Log {
+            level: ocr_core::LogLevel::Info,
+            message: format!(
+                "{parallel} pages at once (llama-server -np {parallel}, context {})",
+                ocr_engine::PARALLEL_CONTEXT_SIZE
+            ),
+        });
+        if server.device_used() == ocr_core::Device::Cpu {
+            events(ProgressEvent::Log {
+                level: ocr_core::LogLevel::Warning,
+                message: "parallel pages on CPU may not speed up recognition".to_string(),
+            });
+        }
     }
 
     let renderer = if prepared.files.iter().any(|p| is_pdf(p)) {
@@ -517,62 +578,98 @@ fn process_document(
         cancelled = outcome.cancelled;
 
         let total_selected = indices.len() as u32;
-        for (selected_offset, page) in outcome.pages.into_iter().enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                cancelled = true;
-                break;
-            }
-            let page_number = page.index + 1;
-            events(ProgressEvent::PageStarted {
-                path: path_text.clone(),
-                page: page_number,
-                total_pages: total_pages as u32,
+        let page_inputs: Vec<PageInput> = outcome
+            .pages
+            .into_iter()
+            .enumerate()
+            .map(|(selected_offset, page)| PageInput {
+                page_number: page.index + 1,
                 selected_index: selected_offset as u32 + 1,
-                selected_total: total_selected,
-            });
-            let page_started = Instant::now();
-            match recognize_cancellable(server, &page.jpeg, options.max_tokens, cancel) {
-                Ok(answer) => {
-                    let clean = clean_model_html(&answer);
-                    if clean.is_empty() {
-                        pages_failed += 1;
-                        let message = "model returned an empty page".to_string();
-                        errors.push(format!("page {page_number}: {message}"));
+                jpeg: page.jpeg,
+                width: page.width,
+                height: page.height,
+            })
+            .collect();
+
+        let recognize =
+            |jpeg: &[u8]| recognize_cancellable(server, jpeg, options.max_tokens, cancel);
+        let mut on_event = |event: PageEvent<'_>| match event {
+            PageEvent::Started(input) => {
+                events(ProgressEvent::PageStarted {
+                    path: path_text.clone(),
+                    page: input.page_number,
+                    total_pages: total_pages as u32,
+                    selected_index: input.selected_index,
+                    selected_total: total_selected,
+                });
+            }
+            PageEvent::Done(attempt) => {
+                let page_number = attempt.input.page_number;
+                match &attempt.clean {
+                    Ok(clean) if clean.is_empty() => {
                         events(ProgressEvent::PageFailed {
                             path: path_text.clone(),
                             page: page_number,
-                            error: message,
+                            error: "model returned an empty page".to_string(),
                         });
-                    } else {
-                        pages_ok += 1;
+                    }
+                    Ok(clean) => {
                         events(ProgressEvent::PageFinished {
                             path: path_text.clone(),
                             page: page_number,
                             chars: clean.chars().count(),
-                            elapsed: page_started.elapsed(),
-                        });
-                        pages.push(PageOutput {
-                            page_number: Some(page_number),
-                            html: clean,
-                            jpeg: page.jpeg,
-                            width: page.width,
-                            height: page.height,
+                            elapsed: attempt.elapsed,
                         });
                     }
+                    Err(error) => {
+                        if !cancel.load(Ordering::Relaxed) {
+                            events(ProgressEvent::PageFailed {
+                                path: path_text.clone(),
+                                page: page_number,
+                                error: format!("{error:#}"),
+                            });
+                        }
+                    }
+                }
+            }
+        };
+        let (attempts, worker_cancelled) = recognize_pages_chunked(
+            page_inputs,
+            options.effective_parallel_pages(),
+            cancel,
+            &recognize,
+            &mut on_event,
+        );
+        cancelled |= worker_cancelled;
+
+        // The runner returns attempts in document order even though the two
+        // pages of a chunk finish independently.
+        for attempt in attempts {
+            let input = attempt.input;
+            let page_number = input.page_number;
+            match attempt.clean {
+                Ok(clean) if clean.is_empty() => {
+                    pages_failed += 1;
+                    errors.push(format!("page {page_number}: model returned an empty page"));
+                }
+                Ok(clean) => {
+                    pages_ok += 1;
+                    pages.push(PageOutput {
+                        page_number: Some(page_number),
+                        html: clean,
+                        jpeg: input.jpeg,
+                        width: input.width,
+                        height: input.height,
+                    });
                 }
                 Err(error) => {
                     if cancel.load(Ordering::Relaxed) {
                         cancelled = true;
-                        break;
+                        continue;
                     }
                     pages_failed += 1;
                     let message = format!("{error:#}");
                     errors.push(format!("page {page_number}: {message}"));
-                    events(ProgressEvent::PageFailed {
-                        path: path_text.clone(),
-                        page: page_number,
-                        error: message,
-                    });
                 }
             }
         }
@@ -773,6 +870,95 @@ fn render_options(options: &JobOptions) -> RenderOptions {
         max_pixels: options.max_pixels,
         password: options.password.clone(),
     }
+}
+
+/// One rendered page ready for recognition.
+struct PageInput {
+    page_number: u32,
+    /// 1-based position in the selected page list.
+    selected_index: u32,
+    jpeg: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// One finished page attempt from the chunked runner.
+struct PageAttempt {
+    input: PageInput,
+    /// Sanitized model HTML; an empty `Ok` means an empty page, `Err` means
+    /// recognition failed.
+    clean: Result<String>,
+    elapsed: Duration,
+}
+
+/// Callbacks fired while a chunk is running. `Done` order is completion order;
+/// the runner still returns results in document order.
+enum PageEvent<'a> {
+    Started(&'a PageInput),
+    Done(&'a PageAttempt),
+}
+
+/// Recognize PDF pages in chunks of `parallel_pages` (1 or 2).
+///
+/// Both pages of a chunk are started before either result is awaited, so their
+/// requests overlap on a llama-server launched with `-np 2`. Events are emitted
+/// as pages finish; the returned attempts are ordered by input index, which keeps
+/// Markdown/HTML/JSON pages in document order regardless of completion order.
+fn recognize_pages_chunked(
+    pages: Vec<PageInput>,
+    parallel_pages: u32,
+    cancel: &AtomicBool,
+    recognize: &(dyn Fn(&[u8]) -> Result<String> + Sync),
+    on_event: &mut dyn FnMut(PageEvent<'_>),
+) -> (Vec<PageAttempt>, bool) {
+    let parallel = parallel_pages.clamp(1, MAX_PARALLEL_PAGES) as usize;
+    let total = pages.len();
+    let mut slots: Vec<Option<PageAttempt>> = (0..total).map(|_| None).collect();
+    let mut remaining = pages.into_iter().enumerate();
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let batch: Vec<(usize, PageInput)> = remaining.by_ref().take(parallel).collect();
+        if batch.is_empty() {
+            break;
+        }
+        // Both pages of the chunk are announced before either request starts.
+        for (_, input) in &batch {
+            on_event(PageEvent::Started(input));
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for (index, input) in batch {
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    let started = Instant::now();
+                    let clean = recognize(&input.jpeg).map(|answer| clean_model_html(&answer));
+                    let attempt = PageAttempt {
+                        input,
+                        clean,
+                        elapsed: started.elapsed(),
+                    };
+                    let _ = sender.send((index, attempt));
+                });
+            }
+            drop(sender);
+            for (index, attempt) in receiver {
+                on_event(PageEvent::Done(&attempt));
+                slots[index] = Some(attempt);
+            }
+        });
+    }
+
+    // Cancellation only matters if some pages were never attempted. A cancel
+    // that arrives after the last page finished must not mark a complete
+    // document as cancelled.
+    let cancelled = cancel.load(Ordering::Relaxed) && slots.iter().any(Option::is_none);
+    let mut ordered: Vec<PageAttempt> = slots.into_iter().flatten().collect();
+    ordered.sort_by_key(|attempt| attempt.input.page_number);
+    (ordered, cancelled)
 }
 
 /// Run one blocking request while polling `cancel`. On cancellation the server
@@ -1655,6 +1841,25 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_an_out_of_range_image_token_budget() {
+        let options = JobOptions {
+            inputs: vec![PathBuf::from("a.pdf")],
+            image_max_tokens: 0,
+            ..JobOptions::default()
+        };
+        let text = format!("{:#}", preflight(&options).unwrap_err());
+        assert!(text.contains("--image-max-tokens"), "{text}");
+
+        let options = JobOptions {
+            inputs: vec![PathBuf::from("a.pdf")],
+            image_max_tokens: 4097,
+            ..JobOptions::default()
+        };
+        let text = format!("{:#}", preflight(&options).unwrap_err());
+        assert!(text.contains("--image-max-tokens"), "{text}");
+    }
+
+    #[test]
     fn image_is_converted_to_jpeg_and_downscaled() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test.png");
@@ -2325,5 +2530,108 @@ mod tests {
         assert!(sources.contains(&"a.pdf"), "{sources:?}");
         assert!(sources.contains(&"b.pdf"), "{sources:?}");
         assert!(!dir.join(".ocr-meta.lock").exists());
+    }
+
+    #[test]
+    fn speed_defaults_are_quality_and_single_page() {
+        let options = JobOptions::default();
+        assert_eq!(options.image_max_tokens, DEFAULT_IMAGE_MAX_TOKENS);
+        assert_eq!(options.effective_parallel_pages(), 1);
+        assert!(!options.is_fast());
+    }
+
+    #[test]
+    fn fast_profile_is_reduced_image_tokens() {
+        let options = JobOptions {
+            image_max_tokens: ocr_engine::FAST_IMAGE_MAX_TOKENS,
+            ..JobOptions::default()
+        };
+        assert!(options.is_fast());
+        assert_eq!(options.image_max_tokens, 2048);
+    }
+
+    #[test]
+    fn parallel_pages_are_clamped_to_one_or_two() {
+        let mut options = JobOptions {
+            parallel_pages: 0,
+            ..JobOptions::default()
+        };
+        assert_eq!(options.effective_parallel_pages(), 1);
+        options.parallel_pages = 5;
+        assert_eq!(options.effective_parallel_pages(), MAX_PARALLEL_PAGES);
+    }
+
+    fn page_input(number: u32) -> PageInput {
+        PageInput {
+            page_number: number,
+            selected_index: number,
+            jpeg: vec![number as u8],
+            width: 10,
+            height: 10,
+        }
+    }
+
+    #[test]
+    fn parallel_chunks_overlap_and_return_pages_in_document_order() {
+        use std::sync::atomic::AtomicUsize;
+        let concurrency = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let recognize = |jpeg: &[u8]| {
+            let active = concurrency.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(active, Ordering::SeqCst);
+            // The first page is deliberately slower, so completion order is
+            // 2, 1 and then the tail page 3.
+            std::thread::sleep(Duration::from_millis(if jpeg[0] == 1 { 120 } else { 20 }));
+            concurrency.fetch_sub(1, Ordering::SeqCst);
+            Ok(format!("<p>page {}</p>", jpeg[0]))
+        };
+        let mut started = Vec::new();
+        let mut finished = Vec::new();
+        let (attempts, cancelled) = recognize_pages_chunked(
+            (1..=3).map(page_input).collect(),
+            2,
+            &AtomicBool::new(false),
+            &recognize,
+            &mut |event| match event {
+                PageEvent::Started(input) => started.push(input.page_number),
+                PageEvent::Done(attempt) => finished.push(attempt.input.page_number),
+            },
+        );
+
+        assert!(!cancelled);
+        assert_eq!(started, vec![1, 2, 3]);
+        assert_eq!(peak.load(Ordering::SeqCst), 2, "two requests must overlap");
+        assert_eq!(
+            finished,
+            vec![2, 1, 3],
+            "events arrive as pages finish, not in page order"
+        );
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.input.page_number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "merged output keeps document order"
+        );
+        assert_eq!(attempts[0].clean.as_ref().unwrap(), "<p>page 1</p>");
+        assert_eq!(attempts[2].clean.as_ref().unwrap(), "<p>page 3</p>");
+    }
+
+    #[test]
+    fn cancelled_parallel_run_starts_no_page_and_returns_empty() {
+        let recognize = |_: &[u8]| Ok("<p>never</p>".to_string());
+        let cancel = AtomicBool::new(true);
+        let mut events = 0usize;
+        let (attempts, cancelled) = recognize_pages_chunked(
+            vec![page_input(1), page_input(2)],
+            2,
+            &cancel,
+            &recognize,
+            &mut |_| events += 1,
+        );
+        assert!(cancelled);
+        assert!(attempts.is_empty());
+        assert_eq!(events, 0);
     }
 }

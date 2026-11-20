@@ -12,6 +12,10 @@ pub use download::{
     download_models, download_models_cancellable, human_bytes, DownloadProgress, MODEL_FILES,
 };
 pub use job::{preflight, run_job, JobOptions, JobReport, PreparedJob};
+/// Speed-profile constants shared by the CLI and GUI.
+pub use ocr_engine::{
+    DEFAULT_IMAGE_MAX_TOKENS, DEFAULT_PARALLEL_PAGES, FAST_IMAGE_MAX_TOKENS, MAX_PARALLEL_PAGES,
+};
 pub use runtime::{
     download_runtime, runtime_assets, runtime_assets_for, runtime_download_mb, verify_runtime,
     RuntimeAsset, RuntimeComponent, RuntimeInstall, RuntimeProgress,

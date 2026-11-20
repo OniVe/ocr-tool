@@ -16,6 +16,7 @@ use egui::{
 use ocr_app::runtime::runtime_download_mb;
 use ocr_app::setup::ModelStatus;
 use ocr_core::{BlockExtraction, Device, OutputFormat};
+use ocr_engine::{DEFAULT_IMAGE_MAX_TOKENS, FAST_IMAGE_MAX_TOKENS};
 
 use crate::{gui_log, prefs, status_text, FailureKind, OcrApp, StatusPhase};
 
@@ -325,6 +326,8 @@ pub fn draw(app: &mut OcrApp, ctx: &egui::Context) {
                         files_card(app, ui);
                         card_gap(ui);
                         output_card(app, ui);
+                        card_gap(ui);
+                        speed_card(app, ui);
                     }
                     card_gap(ui);
                     advanced_card(app, ui);
@@ -1055,6 +1058,82 @@ fn output_card(app: &mut OcrApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Quality/fast image-token profile and the parallel-PDF switch.
+fn speed_card(app: &mut OcrApp, ui: &mut egui::Ui) {
+    card(ui, |ui| {
+        section_title(ui, "3. Скорость");
+        ui.horizontal_wrapped(|ui| {
+            let dark = ui.visuals().dark_mode;
+            ui.label(RichText::new("Профиль").color(muted(ui)));
+            for (tokens, label) in [
+                (DEFAULT_IMAGE_MAX_TOKENS, "Качество"),
+                (FAST_IMAGE_MAX_TOKENS, "Быстро"),
+            ] {
+                let selected = app.image_max_tokens == tokens;
+                let text = if selected {
+                    RichText::new(label).strong().color(Color32::WHITE)
+                } else {
+                    RichText::new(label)
+                };
+                let button = egui::Button::new(text)
+                    .selected(selected)
+                    .fill(if selected {
+                        accent_fill(dark)
+                    } else {
+                        soft_fill(dark)
+                    })
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if selected {
+                            accent_fill(dark)
+                        } else {
+                            border(dark)
+                        },
+                    ))
+                    .min_size(Vec2::new(120.0, 40.0));
+                if ui.add(button).clicked() && !selected {
+                    app.image_max_tokens = tokens;
+                    app.save_prefs();
+                }
+            }
+        });
+        let hint = if app.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS {
+            "Быстро: 2048 токенов изображения, примерно на 15% меньше времени. Строки \
+             таблиц (БИК, Сч. №) могут сдвигаться — проверяйте реквизиты."
+        } else {
+            "Качество: 4096 токенов изображения. Лучше сохраняет таблицы и мелкий текст."
+        };
+        ui.label(RichText::new(hint).small().color(muted(ui)));
+
+        ui.add_space(4.0);
+        let mut parallel = app.parallel_pages > 1;
+        let response = ui
+            .checkbox(&mut parallel, "2 страницы одновременно (PDF; GPU)")
+            .on_hover_text(
+                "llama-server запускается с -np 2 и контекстом 20000. Ускоряет пакет \
+                 страниц, но не одну страницу; нужно около 5 ГБ VRAM.",
+            );
+        if response.changed() {
+            app.parallel_pages = if parallel { 2 } else { 1 };
+            app.save_prefs();
+        }
+        ui.label(
+            RichText::new(
+                "Две страницы PDF распознаются параллельно: быстрее весь документ, \
+                 задержка одной страницы не меняется. На CPU ускорения может не быть.",
+            )
+            .small()
+            .color(muted(ui)),
+        );
+        if parallel && app.is_cpu_mode() {
+            ui.colored_label(
+                warn_color(ui.visuals().dark_mode),
+                "На CPU две страницы одновременно могут не ускорить распознавание.",
+            );
+        }
+    });
+}
+
 /// Persistent primary action above the status bar. Keeping it outside the
 /// scroll area means «Распознать» stays visible with a long file list or while
 /// the setup card is on screen.
@@ -1682,6 +1761,9 @@ fn progress_line(app: &OcrApp) -> Option<String> {
     } else if app.current_file.is_some() {
         parts.push("Готовим страницы…".to_string());
     }
+    if app.job_parallel_pages > 1 && app.page_selected_total > 1 {
+        parts.push("2 страницы одновременно".to_string());
+    }
     if let Some(eta) = page_eta(app) {
         parts.push(eta);
     }
@@ -1714,10 +1796,13 @@ impl EtaMode {
         }
     }
 
-    fn seconds_per_page(self) -> f64 {
-        match self {
-            EtaMode::Cpu => 12.0 * 60.0,
-            EtaMode::Gpu => 30.0,
+    fn seconds_per_page(self, fast: bool) -> f64 {
+        match (self, fast) {
+            (EtaMode::Cpu, false) => 12.0 * 60.0,
+            // The fast profile cuts prefill; on CPU decode still dominates.
+            (EtaMode::Cpu, true) => 10.0 * 60.0,
+            (EtaMode::Gpu, false) => 30.0,
+            (EtaMode::Gpu, true) => 25.0,
         }
     }
 }
@@ -1733,11 +1818,19 @@ fn eta_mode(device: Device, runtime_cpu_only: bool) -> EtaMode {
     }
 }
 
-fn initial_page_eta(mode: EtaMode, selected_pages: u32) -> Option<f64> {
+fn initial_page_eta(
+    mode: EtaMode,
+    selected_pages: u32,
+    fast: bool,
+    parallel_pages: u32,
+) -> Option<f64> {
     if selected_pages == 0 {
         return None;
     }
-    Some(mode.startup_seconds() + mode.seconds_per_page() * selected_pages as f64)
+    // Parallel pages shorten the number of waves, not the latency of one page.
+    let parallel = parallel_pages.clamp(1, 2) as f64;
+    let waves = (selected_pages as f64 / parallel).ceil();
+    Some(mode.startup_seconds() + mode.seconds_per_page(fast) * waves)
 }
 
 fn refined_page_eta(
@@ -1745,6 +1838,7 @@ fn refined_page_eta(
     selected_index: u32,
     pages_done: u32,
     page_seconds_total: f64,
+    parallel_pages: u32,
 ) -> Option<f64> {
     if selected_total == 0 || pages_done == 0 {
         return None;
@@ -1757,7 +1851,8 @@ fn refined_page_eta(
     if remaining == 0 {
         return None;
     }
-    let seconds = average * remaining as f64;
+    let parallel = parallel_pages.clamp(1, 2) as f64;
+    let seconds = average * remaining as f64 / parallel;
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
@@ -1770,18 +1865,21 @@ fn estimate_page_eta(
     selected_index: u32,
     pages_done: u32,
     page_seconds_total: f64,
+    fast: bool,
+    parallel_pages: u32,
 ) -> Option<f64> {
     if selected_total == 0 {
         return None;
     }
     if pages_done == 0 {
-        initial_page_eta(mode, selected_total)
+        initial_page_eta(mode, selected_total, fast, parallel_pages)
     } else {
         refined_page_eta(
             selected_total,
             selected_index,
             pages_done,
             page_seconds_total,
+            parallel_pages,
         )
     }
 }
@@ -1796,12 +1894,15 @@ fn eta_label(seconds: f64, multi_file: bool) -> String {
 }
 
 fn page_eta(app: &OcrApp) -> Option<String> {
+    let fast = app.job_image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS;
     let seconds = estimate_page_eta(
         eta_mode(app.device, app.is_cpu_mode()),
         app.page_selected_total,
         app.page_selected_index,
         app.pages_done,
         app.page_seconds_total,
+        fast,
+        app.job_parallel_pages,
     )?;
     Some(eta_label(seconds, app.job_files_total > 1))
 }
@@ -2083,6 +2184,8 @@ impl OcrApp {
         self.page_selected_total = 0;
         self.pages_done = 0;
         self.page_seconds_total = 0.0;
+        self.job_image_max_tokens = self.image_max_tokens;
+        self.job_parallel_pages = self.parallel_pages.clamp(1, 2);
         self.status = "Добавьте файлы — начнём с шага 1.".to_string();
     }
 
@@ -2094,6 +2197,9 @@ impl OcrApp {
             dpi: Some(self.dpi),
             extract_blocks: Some(self.extract_blocks.as_str().to_string()),
             extract_images: Some(self.extract_blocks == BlockExtraction::Images),
+            fast: Some(self.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS),
+            image_max_tokens: Some(self.image_max_tokens),
+            parallel_pages: Some(self.parallel_pages),
         });
     }
 }
@@ -2146,42 +2252,64 @@ mod tests {
         assert_eq!(eta_mode(Device::Auto, true), EtaMode::Cpu);
 
         // 20 s startup + 12 min for one page; 10 s + 30 s for GPU.
-        assert_eq!(initial_page_eta(EtaMode::Cpu, 1), Some(740.0));
-        assert_eq!(initial_page_eta(EtaMode::Gpu, 1), Some(40.0));
-        assert_eq!(initial_page_eta(EtaMode::Cpu, 0), None);
+        assert_eq!(initial_page_eta(EtaMode::Cpu, 1, false, 1), Some(740.0));
+        assert_eq!(initial_page_eta(EtaMode::Gpu, 1, false, 1), Some(40.0));
+        assert_eq!(initial_page_eta(EtaMode::Cpu, 0, false, 1), None);
+
+        // Fast CPU is ~10 min/page, fast GPU ~25 s/page.
+        assert_eq!(initial_page_eta(EtaMode::Cpu, 1, true, 1), Some(620.0));
+        assert_eq!(initial_page_eta(EtaMode::Gpu, 1, true, 1), Some(35.0));
+
+        // Two pages in parallel are two waves, not three sequential latencies.
+        assert_eq!(initial_page_eta(EtaMode::Gpu, 3, false, 2), Some(70.0));
 
         // Three selected CPU pages: 20 + 3 * 720 = 2180 s.
-        let cpu = estimate_page_eta(eta_mode(Device::Cpu, true), 3, 0, 0, 0.0).unwrap();
+        let cpu = estimate_page_eta(eta_mode(Device::Cpu, true), 3, 0, 0, 0.0, false, 1).unwrap();
         assert_eq!(cpu, 2180.0);
         assert_eq!(format_seconds(cpu), "37 мин");
 
         // Auto + GPU: 10 + 3 * 30 = 100 s ≈ 2 min, not 12 min/page.
-        let auto_gpu = estimate_page_eta(eta_mode(Device::Auto, false), 3, 0, 0, 0.0).unwrap();
+        let auto_gpu =
+            estimate_page_eta(eta_mode(Device::Auto, false), 3, 0, 0, 0.0, false, 1).unwrap();
         assert_eq!(auto_gpu, 100.0);
         assert_eq!(format_seconds(auto_gpu), "2 мин");
 
-        let gpu = estimate_page_eta(eta_mode(Device::Gpu, false), 3, 0, 0, 0.0).unwrap();
+        let gpu = estimate_page_eta(eta_mode(Device::Gpu, false), 3, 0, 0, 0.0, false, 1).unwrap();
         assert_eq!(gpu, 100.0);
         assert_eq!(format_seconds(gpu), "2 мин");
 
-        assert_eq!(estimate_page_eta(EtaMode::Cpu, 0, 0, 0, 0.0), None);
+        assert_eq!(
+            estimate_page_eta(EtaMode::Cpu, 0, 0, 0, 0.0, false, 1),
+            None
+        );
     }
 
     #[test]
     fn eta_refines_from_the_actual_average_after_the_first_page() {
         // One page finished in 16 s, four selected pages remain.
-        let first = estimate_page_eta(EtaMode::Gpu, 5, 1, 1, 16.0).unwrap();
+        let first = estimate_page_eta(EtaMode::Gpu, 5, 1, 1, 16.0, false, 1).unwrap();
         assert_eq!(first, 64.0);
 
         // Three pages finished, 45 s total, two pages remain.
-        let later = estimate_page_eta(EtaMode::Gpu, 5, 3, 3, 45.0).unwrap();
+        let later = estimate_page_eta(EtaMode::Gpu, 5, 3, 3, 45.0, false, 1).unwrap();
         assert_eq!(later, 30.0);
         assert_eq!(format_seconds(later), "30 с");
 
+        // With two pages in flight the same work is one wave, not two.
+        // Two pages took 13 s each (26 s total), three pages still start.
+        let parallel = estimate_page_eta(EtaMode::Gpu, 5, 2, 2, 26.0, false, 2).unwrap();
+        assert_eq!(parallel, 19.5);
+
+        // Fast changes only the pre-first-page planning number.
+        assert_eq!(refined_page_eta(5, 3, 3, 45.0, 1), Some(30.0));
+
         // No remaining pages, no ETA.
-        assert_eq!(estimate_page_eta(EtaMode::Cpu, 5, 5, 5, 75.0), None);
-        assert_eq!(refined_page_eta(0, 0, 0, 0.0), None);
-        assert_eq!(refined_page_eta(5, 1, 0, 0.0), None);
+        assert_eq!(
+            estimate_page_eta(EtaMode::Cpu, 5, 5, 5, 75.0, false, 1),
+            None
+        );
+        assert_eq!(refined_page_eta(0, 0, 0, 0.0, 1), None);
+        assert_eq!(refined_page_eta(5, 1, 0, 0.0, 1), None);
     }
 
     #[test]
