@@ -71,18 +71,27 @@ impl PdfRenderer {
     }
 
     fn from_library(library: PathBuf) -> Result<Self> {
-        let bindings = Pdfium::bind_to_library(&library).map_err(|error| {
-            anyhow!(
-                "failed to load PDFium from {}: {error}\n\
-                 Hint: the library must match the architecture of this executable, \
-                 and its dependencies (for example the MSVC runtime) must be available.",
-                library.display()
-            )
-        })?;
-        Ok(Self {
-            pdfium: Pdfium::new(bindings),
-            library,
-        })
+        let pdfium = match Pdfium::bind_to_library(&library) {
+            Ok(bindings) => Pdfium::new(bindings),
+            // `pdfium-render` keeps the bindings in a process-wide `OnceCell`
+            // (see `Pdfium::new` in the crate), so only the first renderer in
+            // the process can load the library; every later one gets this
+            // error even though the functions are already available. The error
+            // is returned only when the bindings are initialized, and that is
+            // exactly the state `Pdfium::default()` reuses without touching
+            // the filesystem again, so the second and further recognition jobs
+            // in the same process keep the library that the first job loaded.
+            Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Pdfium::default(),
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to load PDFium from {}: {error}\n\
+                     Hint: the library must match the architecture of this executable, \
+                     and its dependencies (for example the MSVC runtime) must be available.",
+                    library.display()
+                ))
+            }
+        };
+        Ok(Self { pdfium, library })
     }
 
     pub fn library_path(&self) -> &Path {
