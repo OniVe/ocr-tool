@@ -5,23 +5,30 @@
 //! logs; diagnostics are always appended to `gui.log` (see [`gui_log`]).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod demo;
 mod gui_log;
+mod prefs;
+mod ui;
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ocr_app::download::{human_bytes, DownloadProgress, REPO_URL};
-use ocr_app::runtime::{download_runtime, runtime_download_mb, RuntimeInstall, RuntimeProgress};
+use ocr_app::runtime::{download_runtime, RuntimeComponent, RuntimeInstall, RuntimeProgress};
 use ocr_app::setup::{
     model_status, pdfium_for_runtime, runtime_status, ModelStatus, PdfiumSource, RuntimeStatus,
 };
 use ocr_app::{download_models_cancellable, run_job, JobOptions, JobReport};
 use ocr_core::{
-    default_runtime_dir, resolve_model_dir, Device, OutputFormat, ProgressEvent, MODEL_ENV,
+    default_runtime_dir, resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent,
+    MODEL_ENV,
 };
+use ocr_engine::DEFAULT_MAX_TOKENS;
+use ocr_pdf::DEFAULT_MAX_PIXELS;
 
 fn main() -> eframe::Result<()> {
     let log_path = gui_log::init();
@@ -35,9 +42,9 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 840.0])
-            .with_min_inner_size([760.0, 620.0])
-            .with_title("ocr-tool — Chandra OCR 2"),
+            .with_inner_size([1000.0, 940.0])
+            .with_min_inner_size([900.0, 700.0])
+            .with_title("ocr-tool — Распознавание документов"),
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -60,19 +67,15 @@ fn main() -> eframe::Result<()> {
 /// names the log path.
 fn show_startup_error(error: &str, log_path: &Path) {
     let description = format!(
-        "{error}\n\nThe full error and backtrace are in:\n{}\n\n\
-         Errors after the window opens are shown in its Log panel.",
+        "Не удалось запустить окно.\n\n{error}\n\nПолный журнал: {}",
         log_path.display()
     );
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
-        .set_title("ocr-tool — cannot start")
+        .set_title("ocr-tool — не удалось запустить")
         .set_description(description)
         .show();
 }
-
-const OK_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 170, 100);
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(210, 160, 60);
 
 struct LogLine {
     text: String,
@@ -171,6 +174,22 @@ impl Drop for RuntimeGuard {
     }
 }
 
+/// What the user can do after an error. Kept separate from the message so the
+/// error card can offer the right button instead of a generic "try again".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FailureKind {
+    Model,
+    Runtime,
+    Pdfium,
+    File,
+    Output,
+    Password,
+    Pages,
+    Timeout,
+    #[default]
+    Unknown,
+}
+
 struct OcrApp {
     inputs: Vec<PathBuf>,
     output_dir: String,
@@ -184,15 +203,32 @@ struct OcrApp {
     llama_dir: String,
     pdfium: String,
     runtime_dir: String,
+    max_pixels: u64,
+    max_tokens: u32,
+    timeout_secs: u64,
 
     running: bool,
     cancelling: bool,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Msg>>,
     progress: f32,
+    job_progress: f32,
     status: String,
     logs: Vec<LogLine>,
     last_report: Option<JobReport>,
+    last_error: Option<String>,
+    last_error_kind: FailureKind,
+
+    job_started: Option<Instant>,
+    job_files_total: usize,
+    job_file_index: usize,
+    current_file: Option<String>,
+    page: u32,
+    page_total: u32,
+    page_selected_index: u32,
+    page_selected_total: u32,
+    pages_done: u32,
+    page_seconds_total: f64,
 
     model_status: ModelStatus,
     runtime: RuntimeStatus,
@@ -206,36 +242,90 @@ struct OcrApp {
     runtime_text: String,
     download_last_percent: Option<u32>,
     runtime_last_percent: Option<u32>,
+    download_file_index: usize,
+    download_file_total: usize,
+    download_started: Option<Instant>,
+    runtime_started: Option<Instant>,
+    runtime_component: Option<RuntimeComponent>,
     confirm_replace: bool,
     confirm_runtime_replace: bool,
+
+    show_help: bool,
+    show_advanced: bool,
+    show_password: bool,
+    show_details: bool,
+    scroll_log: bool,
+    forced_theme: Option<egui::Theme>,
+    shot: Option<demo::Shot>,
+    started_at: Instant,
 }
 
 impl OcrApp {
     fn new() -> Self {
-        let output = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("ocr-output");
+        let prefs = prefs::load();
+        let demo = demo::Demo::from_env();
+        let run_demo = demo.run;
+        let output = demo
+            .output_dir
+            .clone()
+            .or_else(|| prefs.output_dir().map(PathBuf::from))
+            .unwrap_or_else(prefs::default_output_dir);
+        let format = prefs
+            .format
+            .as_deref()
+            .and_then(|value| OutputFormat::from_str(value).ok())
+            .unwrap_or(OutputFormat::Both);
+        let device = demo
+            .device
+            .or_else(|| {
+                prefs
+                    .device
+                    .as_deref()
+                    .and_then(|value| Device::from_str(value).ok())
+            })
+            .unwrap_or(Device::Auto);
+        let dpi = prefs.dpi.unwrap_or(192).clamp(72, 600);
+
         let mut app = Self {
-            inputs: Vec::new(),
+            inputs: demo.inputs,
             output_dir: output.display().to_string(),
-            format: OutputFormat::Both,
-            device: Device::Auto,
-            dpi: 192,
-            pages: String::new(),
+            format,
+            device,
+            dpi,
+            pages: demo.pages.unwrap_or_default(),
             password: String::new(),
             recursive: false,
             model_dir: String::new(),
             llama_dir: String::new(),
             pdfium: String::new(),
             runtime_dir: String::new(),
+            max_pixels: DEFAULT_MAX_PIXELS,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            timeout_secs: 600,
+
             running: false,
             cancelling: false,
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
             progress: 0.0,
-            status: "Add files or a folder, then press Recognize.".to_string(),
+            job_progress: 0.0,
+            status: "Добавьте файлы — начнём с шага 1.".to_string(),
             logs: Vec::new(),
             last_report: None,
+            last_error: None,
+            last_error_kind: FailureKind::Unknown,
+
+            job_started: None,
+            job_files_total: 0,
+            job_file_index: 0,
+            current_file: None,
+            page: 0,
+            page_total: 0,
+            page_selected_index: 0,
+            page_selected_total: 0,
+            pages_done: 0,
+            page_seconds_total: 0.0,
+
             model_status: ModelStatus::Missing {
                 dir: PathBuf::new(),
                 reason: String::new(),
@@ -248,6 +338,7 @@ impl OcrApp {
                 llama_warnings: Vec::new(),
             },
             setup_key: (String::new(), String::new(), String::new(), String::new()),
+
             downloading: false,
             runtime_downloading: false,
             download_cancel: Arc::new(AtomicBool::new(false)),
@@ -256,10 +347,29 @@ impl OcrApp {
             runtime_text: String::new(),
             download_last_percent: None,
             runtime_last_percent: None,
+            download_file_index: 0,
+            download_file_total: 0,
+            download_started: None,
+            runtime_started: None,
+            runtime_component: None,
             confirm_replace: false,
             confirm_runtime_replace: false,
+
+            show_help: demo.show_help,
+            show_advanced: demo.advanced,
+            show_password: false,
+            show_details: false,
+            scroll_log: false,
+            forced_theme: demo.theme,
+            shot: demo.shot,
+            started_at: Instant::now(),
         };
         app.refresh_setup();
+        // Screenshot harness only: pre-fill state and optionally press the main
+        // button once. The flags are inert when the variables are absent.
+        if run_demo && app.can_start() {
+            app.start();
+        }
         app
     }
 
@@ -280,6 +390,7 @@ impl OcrApp {
                 self.inputs.push(path);
             }
         }
+        self.last_error = None;
     }
 
     fn path_key(&self) -> (String, String, String, String) {
@@ -337,31 +448,65 @@ impl OcrApp {
         self.model_status.is_ready() && self.runtime.is_ready()
     }
 
+    /// A setup error card disappears as soon as the missing piece is found, so
+    /// the user is not left with a stale "not found" next to a ready chip.
+    fn clear_setup_error_if_fixed(&mut self) {
+        let fixed = match self.last_error_kind {
+            FailureKind::Model => self.model_status.is_ready(),
+            FailureKind::Runtime | FailureKind::Pdfium => self.runtime.is_ready(),
+            _ => false,
+        };
+        if fixed {
+            self.last_error = None;
+            self.last_error_kind = FailureKind::Unknown;
+        }
+    }
+
+    /// Why the main button cannot be pressed right now. `None` means ready.
+    fn start_blocker(&self) -> Option<&'static str> {
+        if self.running {
+            Some("Распознавание уже идёт.")
+        } else if self.downloading || self.runtime_downloading {
+            Some("Дождитесь окончания загрузки.")
+        } else if self.inputs.is_empty() {
+            Some("Сначала добавьте файлы.")
+        } else if !self.setup_complete() {
+            Some("Сначала подготовьте инструменты в карточке выше.")
+        } else if self.output_dir.trim().is_empty() {
+            Some("Выберите папку для сохранения.")
+        } else {
+            None
+        }
+    }
+
+    fn can_start(&self) -> bool {
+        self.start_blocker().is_none()
+    }
+
+    fn is_cpu_mode(&self) -> bool {
+        match self.device {
+            Device::Cpu => true,
+            Device::Gpu => false,
+            Device::Auto => !self
+                .runtime
+                .llama
+                .iter()
+                .any(|candidate| candidate.device == Device::Gpu),
+        }
+    }
+
     fn start(&mut self) {
         if self.running || self.downloading || self.runtime_downloading || self.inputs.is_empty() {
             return;
         }
+        self.maybe_refresh_setup();
+        if let Some(blocker) = self.start_blocker() {
+            self.status = blocker.to_string();
+            return;
+        }
         let output_dir = PathBuf::from(self.output_dir.trim());
         if output_dir.as_os_str().is_empty() {
-            self.status = "Choose an output directory first.".to_string();
-            return;
-        }
-
-        self.maybe_refresh_setup();
-        if !self.model_status.is_ready() {
-            self.status = self.model_status.message();
-            self.log(self.status.clone(), true);
-            return;
-        }
-        if !self.runtime.llama_ready() {
-            self.status = self.runtime.message();
-            self.log(self.status.clone(), true);
-            return;
-        }
-        if self.inputs.iter().any(|path| is_pdf_input(path)) && !self.runtime.pdfium_ready() {
-            self.status =
-                "PDFium not found; choose the runtime folder or set OCR_PDFIUM.".to_string();
-            self.log(self.status.clone(), true);
+            self.status = "Выберите папку для сохранения.".to_string();
             return;
         }
 
@@ -385,15 +530,30 @@ impl OcrApp {
             model_dir: non_empty_path(&self.model_dir),
             llama_dir: non_empty_path(&self.llama_dir),
             pdfium: non_empty_path(&self.pdfium),
-            ..JobOptions::default()
+            max_pixels: self.max_pixels,
+            max_tokens: self.max_tokens,
+            request_timeout_secs: self.timeout_secs,
         };
 
         self.running = true;
         self.cancelling = false;
         self.progress = 0.0;
+        self.job_progress = 0.0;
         self.last_report = None;
+        self.last_error = None;
+        self.last_error_kind = FailureKind::Unknown;
         self.logs.clear();
-        self.status = "Starting engine...".to_string();
+        self.status = "Готовим документы…".to_string();
+        self.job_started = Some(Instant::now());
+        self.job_files_total = self.inputs.len();
+        self.job_file_index = 0;
+        self.current_file = None;
+        self.page = 0;
+        self.page_total = 0;
+        self.page_selected_index = 0;
+        self.page_selected_total = 0;
+        self.pages_done = 0;
+        self.page_seconds_total = 0.0;
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = cancel.clone();
 
@@ -431,7 +591,7 @@ impl OcrApp {
         self.maybe_refresh_setup();
         let dir = self.resolved_model_dir();
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.status = format!("Cannot create model directory {}", dir.display());
+            self.status = "Не могу создать папку для модели. Проверьте права доступа.".to_string();
             self.log(
                 format!("error: cannot create {}: {error}", dir.display()),
                 true,
@@ -441,13 +601,13 @@ impl OcrApp {
         self.downloading = true;
         self.confirm_replace = false;
         self.progress = 0.0;
-        self.download_text = "Starting download...".to_string();
+        self.download_text = "Готовим загрузку…".to_string();
         self.download_last_percent = None;
-        self.status = if force {
-            format!("Replacing model files in {}...", dir.display())
-        } else {
-            format!("Downloading model to {}...", dir.display())
-        };
+        self.download_file_index = 0;
+        self.download_file_total = 0;
+        self.download_started = None;
+        self.last_error = None;
+        self.status = "Скачиваем модель…".to_string();
         self.log(
             format!(
                 "download{}: {REPO_URL} -> {}",
@@ -479,14 +639,13 @@ impl OcrApp {
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         self.refresh_setup();
-        let status = self.runtime.message();
+        self.clear_setup_error_if_fixed();
+        let status = runtime_message_ru(&self.runtime);
         self.log(
             format!("runtime folder: {} — {status}", folder.display()),
             !self.runtime.is_ready(),
         );
-        if !self.runtime.is_ready() {
-            self.status = status;
-        }
+        self.status = status;
     }
 
     /// Called when the Runtime folder text field changes. The folder drives
@@ -505,6 +664,7 @@ impl OcrApp {
                 .unwrap_or_default();
         }
         self.refresh_setup();
+        self.clear_setup_error_if_fixed();
     }
 
     /// Download llama-vulkan + llama-cpu + PDFium into the runtime folder.
@@ -517,7 +677,7 @@ impl OcrApp {
         self.maybe_refresh_setup();
         let dir = self.target_runtime_dir();
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.status = format!("Cannot create runtime folder {}", dir.display());
+            self.status = "Не могу создать папку для движка. Проверьте права доступа.".to_string();
             self.log(
                 format!("error: cannot create {}: {error}", dir.display()),
                 true,
@@ -527,13 +687,12 @@ impl OcrApp {
         self.runtime_downloading = true;
         self.confirm_runtime_replace = false;
         self.progress = 0.0;
-        self.runtime_text = "Starting runtime download...".to_string();
+        self.runtime_text = "Готовим загрузку…".to_string();
         self.runtime_last_percent = None;
-        self.status = if force {
-            format!("Re-downloading runtime to {}...", dir.display())
-        } else {
-            format!("Downloading runtime to {}...", dir.display())
-        };
+        self.runtime_started = None;
+        self.runtime_component = None;
+        self.last_error = None;
+        self.status = "Скачиваем движок…".to_string();
         self.log(
             format!(
                 "runtime download{}: llama.cpp b12535 + pdfium 8165 -> {}",
@@ -558,34 +717,6 @@ impl OcrApp {
         });
     }
 
-    fn open_runtime_folder(&mut self) {
-        let dir = self.target_runtime_dir();
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.log(
-                format!("error: cannot create {}: {error}", dir.display()),
-                true,
-            );
-            return;
-        }
-        if let Err(error) = open::that(&dir) {
-            self.log(format!("cannot open {}: {error}", dir.display()), true);
-        }
-    }
-
-    fn open_model_folder(&mut self) {
-        let dir = self.resolved_model_dir();
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.log(
-                format!("error: cannot create {}: {error}", dir.display()),
-                true,
-            );
-            return;
-        }
-        if let Err(error) = open::that(&dir) {
-            self.log(format!("cannot open {}: {error}", dir.display()), true);
-        }
-    }
-
     fn poll(&mut self) {
         loop {
             let message = match &self.rx {
@@ -599,7 +730,15 @@ impl OcrApp {
                         if self.running {
                             self.running = false;
                             self.cancelling = false;
-                            self.status = "Worker stopped unexpectedly. See the log.".to_string();
+                            self.last_error = Some(
+                                "Работа неожиданно остановилась. Документы не изменены. \
+                                 Подробности — в журнале."
+                                    .to_string(),
+                            );
+                            self.last_error_kind = FailureKind::Unknown;
+                            self.status =
+                                "Работа неожиданно остановилась. Подробности — в журнале."
+                                    .to_string();
                             self.log(
                                 "error: worker thread exited without reporting a result"
                                     .to_string(),
@@ -609,7 +748,8 @@ impl OcrApp {
                         if self.downloading {
                             self.downloading = false;
                             self.status =
-                                "Download worker stopped unexpectedly. See the log.".to_string();
+                                "Загрузка модели остановилась. Проверьте интернет и повторите."
+                                    .to_string();
                             self.log(
                                 "error: download thread exited without reporting a result"
                                     .to_string(),
@@ -619,7 +759,7 @@ impl OcrApp {
                         if self.runtime_downloading {
                             self.runtime_downloading = false;
                             self.status =
-                                "Runtime download worker stopped unexpectedly. See the log."
+                                "Загрузка движка остановилась. Проверьте интернет и повторите."
                                     .to_string();
                             self.log(
                                 "error: runtime download thread exited without reporting a result"
@@ -638,35 +778,47 @@ impl OcrApp {
                 Msg::Done(result) => {
                     self.running = false;
                     self.cancelling = false;
+                    self.job_progress = 1.0;
                     match result {
                         Ok(report) => {
+                            let partial = report.documents_failed > 0 || report.pages_failed > 0;
                             self.status = if report.cancelled {
-                                "Cancelled; partial output kept.".to_string()
-                            } else if report.documents_failed > 0 || report.pages_failed > 0 {
+                                "Остановлено. Уже готовые страницы сохранены.".to_string()
+                            } else if partial {
                                 format!(
-                                    "Finished with errors: {} page(s) ok, {} failed.",
-                                    report.pages_ok, report.pages_failed
+                                    "Готово с замечаниями: {} сохранено, {} не удалось. \
+                                     Подробности — в журнале.",
+                                    format_pages(report.pages_ok),
+                                    format_pages(report.pages_failed)
                                 )
                             } else {
                                 format!(
-                                    "Done: {} document(s), {} page(s) in {:.1}s on {}.",
+                                    "Готово: {} {}, {} {}.",
                                     report.documents_ok,
+                                    ui::plural_ru(report.documents_ok, "файл", "файла", "файлов"),
                                     report.pages_ok,
-                                    report.elapsed_ms as f64 / 1000.0,
-                                    report.device
+                                    ui::plural_ru(
+                                        report.pages_ok,
+                                        "страница",
+                                        "страницы",
+                                        "страниц"
+                                    ),
                                 )
                             };
-                            if report.documents_failed > 0 || report.pages_failed > 0 {
+                            if partial {
                                 let status = self.status.clone();
                                 self.log(status, true);
                             }
+                            self.last_error = None;
+                            self.last_error_kind = FailureKind::Unknown;
                             self.last_report = Some(report);
-                            self.progress = 1.0;
                         }
                         Err(error) => {
                             // Keep the raw chain in the log only; the status bar
                             // names the cause and never shows `os error 3`.
-                            self.status = friendly_failure(&error);
+                            self.last_error_kind = classify_failure(&error);
+                            self.last_error = Some(friendly_failure(&error));
+                            self.status = self.last_error.clone().unwrap_or_default();
                             self.log(format!("error: {error}"), true);
                         }
                     }
@@ -676,6 +828,7 @@ impl OcrApp {
                 Msg::Download(progress) => self.handle_download_progress(progress),
                 Msg::DownloadDone(result) => {
                     self.downloading = false;
+                    self.download_started = None;
                     match result {
                         Ok(files) => {
                             self.progress = 1.0;
@@ -692,9 +845,10 @@ impl OcrApp {
                             }
                             self.refresh_setup();
                             self.status = if self.model_status.is_ready() {
-                                format!("Model ready: {}", self.model_status.dir().display())
+                                "Модель готова. Можно продолжать.".to_string()
                             } else {
-                                self.model_status.message()
+                                "Файлы модели неполные. Нажмите «Заменить…», чтобы скачать заново."
+                                    .to_string()
                             };
                             let error = !self.model_status.is_ready();
                             self.log(self.status.clone(), error);
@@ -702,12 +856,14 @@ impl OcrApp {
                         Err(error) => {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
                             self.status = download_failure_status(&error, cancelled);
+                            self.download_text = self.status.clone();
                             self.log(format!("error: {error}"), true);
                             if download_needs_replace(&error) {
                                 self.log(
                                     "use the Replace / Re-download button to replace the existing model files",
                                     true,
                                 );
+                                self.confirm_replace = true;
                             }
                             self.refresh_setup();
                         }
@@ -718,6 +874,8 @@ impl OcrApp {
                 Msg::Runtime(progress) => self.handle_runtime_progress(progress),
                 Msg::RuntimeDone(result) => {
                     self.runtime_downloading = false;
+                    self.runtime_started = None;
+                    self.runtime_component = None;
                     match result {
                         Ok(install) => {
                             self.progress = 1.0;
@@ -736,13 +894,9 @@ impl OcrApp {
                                 false,
                             );
                             self.status = if self.runtime.is_ready() {
-                                format!(
-                                    "Runtime ready: {} llama-server candidate(s) (downloaded to {})",
-                                    self.runtime.llama.len(),
-                                    target.display()
-                                )
+                                "Движок и просмотр PDF готовы. Можно распознавать.".to_string()
                             } else {
-                                self.runtime.message()
+                                runtime_message_ru(&self.runtime)
                             };
                             let error = !self.runtime.is_ready();
                             self.log(self.status.clone(), error);
@@ -750,11 +904,15 @@ impl OcrApp {
                         Err(error) => {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
                             self.status = if cancelled {
-                                "Runtime download cancelled; partial .part files resume on the next attempt"
+                                "Загрузка движка остановлена. Часть файлов сохранена — при \
+                                 следующей попытке продолжим."
                                     .to_string()
                             } else {
-                                "Runtime download failed. See the log.".to_string()
+                                "Не удалось скачать движок. Проверьте подключение к интернету \
+                                 и повторите."
+                                    .to_string()
                             };
+                            self.runtime_text = self.status.clone();
                             self.log(format!("error: {error}"), true);
                             self.refresh_setup();
                         }
@@ -767,36 +925,28 @@ impl OcrApp {
     }
 
     fn handle_runtime_progress(&mut self, progress: RuntimeProgress) {
+        if self.runtime_component != Some(progress.component) {
+            self.runtime_component = Some(progress.component);
+            self.runtime_started = Some(Instant::now());
+        }
         let total = progress.total.max(1);
         let fraction = (progress.downloaded as f32 / total as f32).min(1.0);
         self.progress = fraction;
         let percent = (fraction * 100.0).round() as u32;
+        let label = runtime_component_label(progress.component);
         let suffix = if progress.skipped {
-            " (already present)"
+            " • уже на месте"
         } else {
             ""
         };
         self.runtime_text = format!(
-            "{}: {} / {} ({percent}%){suffix}",
-            progress.component.as_str(),
-            human_bytes(progress.downloaded),
-            human_bytes(progress.total)
+            "{label} • {}{suffix}",
+            ui::progress_text(progress.downloaded, progress.total, self.runtime_started)
         );
         self.status = if progress.done {
-            format!(
-                "Runtime {}: {}{suffix}",
-                progress.component.as_str(),
-                if progress.skipped {
-                    "already present"
-                } else {
-                    "installed"
-                }
-            )
+            format!("{label}: готово.")
         } else {
-            format!(
-                "Downloading runtime {}: {percent}%",
-                progress.component.as_str()
-            )
+            "Скачиваем движок…".to_string()
         };
         let bucket = percent / 10;
         if progress.done
@@ -809,6 +959,13 @@ impl OcrApp {
     }
 
     fn handle_download_progress(&mut self, progress: DownloadProgress) {
+        if progress.file_index != self.download_file_index {
+            self.download_file_index = progress.file_index;
+            self.download_file_total = progress.file_count;
+            // A new shard starts a new ETA window; otherwise the previous
+            // 3 GB would distort the estimate for the small projector file.
+            self.download_started = Some(Instant::now());
+        }
         let total = progress.total.unwrap_or(0);
         let fraction = if total > 0 {
             (progress.downloaded as f32 / total as f32).min(1.0)
@@ -817,37 +974,21 @@ impl OcrApp {
         };
         self.progress = fraction;
         let percent = (fraction * 100.0).round() as u32;
-        let suffix = if progress.skipped {
-            " (already present)"
-        } else {
-            ""
-        };
-        self.download_text = if total > 0 {
-            format!(
-                "{}: {} / {} ({percent}%){suffix}",
-                progress.file,
-                human_bytes(progress.downloaded),
-                human_bytes(total)
-            )
-        } else {
-            format!(
-                "{}: {}{suffix}",
-                progress.file,
-                human_bytes(progress.downloaded)
-            )
-        };
+        let mut text = ui::progress_text(progress.downloaded, total, self.download_started);
+        if self.download_file_total > 1 {
+            text = format!(
+                "Файл {} из {} • {text}",
+                progress.file_index, self.download_file_total
+            );
+        }
+        if progress.skipped {
+            text.push_str(" • уже на месте");
+        }
+        self.download_text = text;
         self.status = if progress.done {
-            format!(
-                "{}: {}{suffix}",
-                progress.file,
-                if progress.skipped {
-                    "already present"
-                } else {
-                    "downloaded"
-                }
-            )
+            "Модель: файл готов.".to_string()
         } else {
-            format!("Downloading {}: {percent}%", progress.file)
+            "Скачиваем модель…".to_string()
         };
         let bucket = percent / 10;
         if progress.done
@@ -862,16 +1003,29 @@ impl OcrApp {
     fn handle_event(&mut self, event: ProgressEvent) {
         match event {
             ProgressEvent::JobStarted { files, output_dir } => {
-                self.status = format!("Starting: {files} file(s) -> {output_dir}");
+                self.job_files_total = files;
+                self.job_file_index = 0;
+                self.job_progress = 0.0;
+                self.status = "Готовим документы…".to_string();
                 self.log(format!("job: {files} file(s) -> {output_dir}"), false);
             }
             ProgressEvent::FileStarted { index, total, path } => {
-                self.status = format!("[{index}/{total}] {path}");
-                self.progress = if total > 0 {
-                    (index.saturating_sub(1)) as f32 / total as f32
+                self.job_file_index = index;
+                self.job_files_total = total;
+                self.current_file = Some(file_name_of(&path));
+                self.page = 0;
+                self.page_total = 0;
+                self.page_selected_index = 0;
+                self.page_selected_total = 0;
+                self.job_progress = if total > 0 {
+                    ((index.saturating_sub(1)) as f32 / total as f32).min(0.99)
                 } else {
                     0.0
                 };
+                self.status = format!(
+                    "Файл {index} из {total}: {}",
+                    self.current_file.as_deref().unwrap_or(&path)
+                );
                 self.log(format!("[{index}/{total}] {path}"), false);
             }
             ProgressEvent::PageStarted {
@@ -881,20 +1035,26 @@ impl OcrApp {
                 selected_total,
                 ..
             } => {
-                self.status = if selected_total != total_pages {
+                self.page = page;
+                self.page_total = total_pages;
+                self.page_selected_index = selected_index;
+                self.page_selected_total = selected_total;
+                self.status = if selected_total > 0 && selected_total != total_pages {
                     format!(
-                        "Page {page}/{total_pages} (selected {selected_index}/{selected_total}): recognizing..."
+                        "Страница {page} из {total_pages} (выбрано {selected_index} из \
+                         {selected_total}): распознаём…"
                     )
                 } else {
-                    format!("Page {page}/{total_pages}: recognizing...")
+                    format!("Страница {page} из {total_pages}: распознаём…")
                 };
-                let base = self.progress;
-                let fraction = if total_pages > 0 {
-                    (page.saturating_sub(1)) as f32 / total_pages as f32
+                let files = self.job_files_total.max(1) as f32;
+                let file_position = self.job_file_index.saturating_sub(1) as f32;
+                let within = if selected_total > 0 {
+                    selected_index.saturating_sub(1) as f32 / selected_total as f32
                 } else {
                     0.0
                 };
-                self.progress = (base + fraction / 10.0).min(0.99);
+                self.job_progress = ((file_position + within) / files).clamp(0.0, 0.99);
             }
             ProgressEvent::PageFinished {
                 page,
@@ -902,6 +1062,8 @@ impl OcrApp {
                 elapsed,
                 ..
             } => {
+                self.pages_done = self.pages_done.saturating_add(1);
+                self.page_seconds_total += elapsed.as_secs_f64();
                 self.log(
                     format!(
                         "  page {page}: {chars} chars in {:.1}s",
@@ -909,7 +1071,14 @@ impl OcrApp {
                     ),
                     false,
                 );
-                self.progress = (self.progress + 0.02).min(0.99);
+                let files = self.job_files_total.max(1) as f32;
+                let file_position = self.job_file_index.saturating_sub(1) as f32;
+                let within = if self.page_selected_total > 0 {
+                    self.page_selected_index as f32 / self.page_selected_total as f32
+                } else {
+                    0.0
+                };
+                self.job_progress = ((file_position + within) / files).clamp(0.0, 0.99);
             }
             ProgressEvent::PageFailed { page, error, .. } => {
                 self.log(format!("  page {page}: FAILED: {error}"), true);
@@ -927,12 +1096,22 @@ impl OcrApp {
                 for output in outputs {
                     self.log(format!("  -> {output}"), false);
                 }
+                let files = self.job_files_total.max(1) as f32;
+                self.job_progress = (self.job_file_index as f32 / files).clamp(0.0, 0.99);
+                if self.job_files_total > 1 {
+                    self.status = format!(
+                        "Файл {} из {} готов.",
+                        self.job_file_index, self.job_files_total
+                    );
+                }
             }
             ProgressEvent::FileFailed { error, .. } => {
                 self.log(format!("  FAILED: {error}"), true);
+                self.status = "Один файл не удался, остальные продолжаются.".to_string();
             }
-            ProgressEvent::Log { message, .. } => {
-                self.log(message, false);
+            ProgressEvent::Log { level, message } => {
+                let error = matches!(level, LogLevel::Error);
+                self.log(message, error);
             }
             ProgressEvent::JobFinished {
                 documents_ok,
@@ -941,597 +1120,64 @@ impl OcrApp {
                 cancelled,
             } => {
                 self.status = format!(
-                    "Finished in {:.1}s: {} ok, {} failed{}",
+                    "Завершено за {:.1} с: {} {}, {} не удалось{}",
                     elapsed.as_secs_f64(),
                     documents_ok,
+                    ui::plural_ru(documents_ok, "файл", "файла", "файлов"),
                     documents_failed,
-                    if cancelled { ", cancelled" } else { "" }
-                );
-            }
-        }
-    }
-
-    fn ui_setup(&mut self, ui: &mut egui::Ui) {
-        let model_ready = self.model_status.is_ready();
-        let model_dir = self.model_status.dir().to_path_buf();
-        let model_detail = self.model_status.detail().map(str::to_string);
-        let model_message = self.model_status.message();
-
-        if !model_ready {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                let incomplete = matches!(self.model_status, ModelStatus::Incomplete { .. });
-                ui.heading(if incomplete {
-                    format!("Model files incomplete in {}", model_dir.display())
-                } else {
-                    format!("Model not found in {}", model_dir.display())
-                });
-                ui.label(
-                    "The Chandra OCR 2 weights (~3.4 GB) are not bundled. Download them once \
-                     or point the app at a folder that already contains them.",
-                );
-                if let Some(detail) = &model_detail {
-                    ui.label(detail);
-                }
-                ui.horizontal(|ui| {
-                    let can_start = !self.downloading && !self.runtime_downloading && !self.running;
-                    if ui
-                        .add_enabled(
-                            can_start,
-                            egui::Button::new(
-                                egui::RichText::new("Download model (~3.4 GB)").strong(),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.start_download();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.downloading && !self.runtime_downloading,
-                            egui::Button::new("Choose existing model folder..."),
-                        )
-                        .clicked()
-                    {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.model_dir = folder.display().to_string();
-                            self.refresh_setup();
-                            self.status = self.model_status.message();
-                        }
-                    }
-                    if ui.button("Open model folder").clicked() {
-                        self.open_model_folder();
-                    }
-                    if self.downloading && ui.button("Cancel download").clicked() {
-                        self.download_cancel.store(true, Ordering::SeqCst);
-                        self.status = "Cancelling download...".to_string();
-                    }
-                });
-                // A canonical file with the wrong size (or a different SHA-256)
-                // cannot be fixed by a plain download: the downloader refuses
-                // to overwrite it. Offer the replace path the GUI can actually
-                // execute instead of only mentioning `--force`.
-                if !self.downloading && !self.runtime_downloading && !self.running {
-                    if !self.confirm_replace {
-                        if ui.button("Replace / Re-download…").clicked() {
-                            self.confirm_replace = true;
-                        }
+                    if cancelled {
+                        ", остановлено"
                     } else {
-                        ui.colored_label(
-                            WARN_COLOR,
-                            "Replace deletes the existing model files (including any .part \
-                             remainder) and downloads the pinned pair again.",
-                        );
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(egui::Button::new(
-                                    egui::RichText::new("Yes, replace and re-download").strong(),
-                                ))
-                                .clicked()
-                            {
-                                self.start_download_force();
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.confirm_replace = false;
-                            }
-                        });
+                        ""
                     }
-                }
-                if self.downloading {
-                    ui.add(
-                        egui::ProgressBar::new(self.progress)
-                            .show_percentage()
-                            .animate(true),
-                    );
-                    ui.label(&self.download_text);
-                }
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.colored_label(OK_COLOR, "Model ready");
-                ui.label(model_dir.display().to_string());
-            });
-        }
-
-        let runtime = self.runtime.clone();
-        let runtime_ready = runtime.is_ready();
-        let runtime_dir = self.target_runtime_dir();
-        let busy = self.downloading || self.runtime_downloading || self.running;
-
-        if !runtime_ready {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.heading(if runtime.llama_ready() {
-                    "Runtime incomplete: PDFium not found"
-                } else {
-                    "Runtime not found"
-                });
-                ui.label(format!(
-                    "llama-server (GPU build plus CPU fallback) and PDFium (~{} MB) are \
-                     downloaded once into the runtime folder below. No CLI or script is needed.",
-                    runtime_download_mb()
-                        .map(|mb| mb.to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                ));
-                ui.horizontal(|ui| {
-                    ui.label("Runtime folder");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.runtime_dir)
-                                .hint_text(default_runtime_dir().display().to_string())
-                                .desired_width(420.0),
-                        )
-                        .changed()
-                    {
-                        self.apply_runtime_dir_text();
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Choose folder…"))
-                        .clicked()
-                    {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.apply_runtime_dir(folder);
-                        }
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Open folder"))
-                        .clicked()
-                    {
-                        self.open_runtime_folder();
-                    }
-                });
-                if let Some(warning) = runtime.llama_warnings.first() {
-                    ui.label(warning);
-                }
-                if !runtime.pdfium_ready() {
-                    if let Err(error) = &runtime.pdfium {
-                        ui.label(error);
-                    }
-                }
-                let label = match runtime_download_mb() {
-                    Some(mb) => format!("Download runtime (~{mb} MB)"),
-                    None => "Download runtime".to_string(),
-                };
-                if ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new(egui::RichText::new(label).strong()),
-                    )
-                    .clicked()
-                {
-                    self.start_runtime_download(false);
-                }
-                ui.weak(format!(
-                    "Installs llama-vulkan, llama-cpu and pdfium into {}. The model and \
-                     runtime folders are independent; choose both to keep everything in one place.",
-                    runtime_dir.display()
-                ));
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.colored_label(OK_COLOR, "Runtime ready");
-                ui.label(format!(
-                    "{} llama-server candidate(s), pdfium {} (from {})",
-                    runtime.llama.len(),
-                    runtime
-                        .pdfium
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default(),
-                    runtime.pdfium_source.label()
-                ));
-            });
-            ui.weak(format!("Runtime folder: {}", runtime_dir.display()));
-            if runtime.pdfium_source.is_env() {
-                ui.colored_label(
-                    WARN_COLOR,
-                    "PDFium is taken from OCR_PDFIUM, not from the runtime folder; unset \
-                     OCR_PDFIUM to use the bundled library.",
                 );
             }
         }
-
-        // The transfer is visible in both states: a re-download of a ready
-        // runtime must still show progress and a Cancel button.
-        if self.runtime_downloading {
-            ui.add(
-                egui::ProgressBar::new(self.progress)
-                    .show_percentage()
-                    .animate(true),
-            );
-            ui.horizontal(|ui| {
-                ui.label(&self.runtime_text);
-                if ui.button("Cancel runtime download").clicked() {
-                    self.runtime_cancel.store(true, Ordering::SeqCst);
-                    self.status = "Cancelling runtime download...".to_string();
-                }
-            });
-        }
-
-        if model_ready && runtime.is_ready() {
-            ui.weak(model_message);
-        }
     }
 
-    fn ui_files(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("Add files…").clicked() {
-                if let Some(files) = rfd::FileDialog::new()
-                    .add_filter(
-                        "Documents",
-                        &["pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp", "bmp"],
-                    )
-                    .pick_files()
-                {
-                    self.add_paths(files);
-                }
-            }
-            if ui.button("Add folder…").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.add_paths([folder]);
-                    self.recursive = true;
-                }
-            }
-            if ui.button("Clear").clicked() {
-                self.inputs.clear();
-            }
-            ui.label(format!("{} input(s)", self.inputs.len()));
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let (open, recognize, escape) = ctx.input_mut(|input| {
+            (
+                input.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::O,
+                )),
+                input.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::Enter,
+                )),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            )
         });
-
-        egui::ScrollArea::vertical()
-            .id_salt("inputs")
-            .max_height(130.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let mut remove = None;
-                for (index, path) in self.inputs.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.small_button("✕").clicked() {
-                            remove = Some(index);
-                        }
-                        ui.label(path.display().to_string());
-                    });
-                }
-                if let Some(index) = remove {
-                    self.inputs.remove(index);
-                }
-            });
-    }
-
-    fn ui_settings(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
-        egui::Grid::new("settings")
-            .num_columns(4)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("Output");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.output_dir).desired_width(420.0));
-                    if ui.button("Choose…").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.output_dir = folder.display().to_string();
-                        }
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Format");
-                egui::ComboBox::from_id_salt("format")
-                    .selected_text(match self.format {
-                        OutputFormat::Md => "Markdown",
-                        OutputFormat::Html => "HTML",
-                        OutputFormat::Both => "Markdown + HTML",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.format,
-                            OutputFormat::Both,
-                            "Markdown + HTML",
-                        );
-                        ui.selectable_value(&mut self.format, OutputFormat::Md, "Markdown");
-                        ui.selectable_value(&mut self.format, OutputFormat::Html, "HTML");
-                    });
-                ui.label("Device");
-                egui::ComboBox::from_id_salt("device")
-                    .selected_text(match self.device {
-                        Device::Auto => "Auto (GPU → CPU)",
-                        Device::Gpu => "GPU",
-                        Device::Cpu => "CPU (slow)",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.device, Device::Auto, "Auto (GPU → CPU)");
-                        ui.selectable_value(&mut self.device, Device::Gpu, "GPU");
-                        ui.selectable_value(&mut self.device, Device::Cpu, "CPU (slow)");
-                    });
-                ui.end_row();
-
-                ui.label("DPI");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.dpi)
-                            .range(72..=600)
-                            .speed(8.0),
-                    );
-                    ui.label("Pages (PDF)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.pages)
-                            .hint_text("all, e.g. 1-5,7")
-                            .desired_width(130.0),
-                    );
-                });
-                ui.label("Options");
-                ui.checkbox(&mut self.recursive, "Recurse into subfolders");
-                ui.end_row();
-
-                ui.label("PDF password");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(true)
-                        .hint_text("optional; never logged")
-                        .desired_width(240.0),
-                );
-                ui.end_row();
-            });
-
-        // Open automatically while setup is incomplete, so the paths are one
-        // click away on the first run.
-        let advanced_open = !self.setup_complete();
-        egui::CollapsingHeader::new("Advanced paths")
-            .default_open(advanced_open)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Model dir");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.model_dir)
-                                .hint_text("auto: OCR_MODEL_DIR or app-data")
-                                .desired_width(430.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.button("…").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.model_dir = folder.display().to_string();
-                            changed = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("llama dir");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.llama_dir)
-                                .hint_text("auto: OCR_LLAMA_SERVER or runtime/")
-                                .desired_width(430.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.button("…").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.llama_dir = folder.display().to_string();
-                            changed = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("PDFium");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.pdfium)
-                                .hint_text("auto: OCR_PDFIUM, next to the exe, runtime/")
-                                .desired_width(430.0),
-                        )
-                        .changed()
-                    {
-                        changed = true;
-                    }
-                    if ui.button("…").clicked() {
-                        if let Some(file) = rfd::FileDialog::new()
-                            .add_filter("PDFium library", &["dll", "so", "dylib"])
-                            .pick_file()
-                        {
-                            self.pdfium = file.display().to_string();
-                            changed = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Runtime folder");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.runtime_dir)
-                                .hint_text(default_runtime_dir().display().to_string())
-                                .desired_width(370.0),
-                        )
-                        .changed()
-                    {
-                        self.apply_runtime_dir_text();
-                    }
-                    if ui.button("…").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.apply_runtime_dir(folder);
-                        }
-                    }
-                    let busy = self.downloading || self.runtime_downloading || self.running;
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Re-download runtime"))
-                        .clicked()
-                    {
-                        self.confirm_runtime_replace = true;
-                    }
-                });
-                if self.confirm_runtime_replace {
-                    ui.colored_label(
-                        WARN_COLOR,
-                        "Re-download replaces the installed llama-vulkan / llama-cpu / pdfium \
-                         in the runtime folder with the pinned b12535 / 8165 builds.",
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("Yes, re-download runtime").strong(),
-                            ))
-                            .clicked()
-                        {
-                            self.start_runtime_download(true);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_runtime_replace = false;
-                        }
-                    });
-                }
-                ui.label(format!(
-                    "Model files: {}",
-                    self.model_status.dir().display()
-                ));
-                ui.label(format!(
-                    "PDFium: {} (source: {})",
-                    self.runtime
-                        .pdfium
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|error| format!("not found ({error})")),
-                    self.runtime.pdfium_source.label()
-                ));
-                ui.label(format!(
-                    "llama-server: {} candidate(s); searched {} location(s)",
-                    self.runtime.llama.len(),
-                    self.runtime.llama_searched.len()
-                ));
-                ui.label(
-                    "The model and llama-server are not bundled. Download model stores the \
-                     weights in the app-data model folder (or Model dir); Download runtime \
-                     installs the pinned llama-server and PDFium into the Runtime folder. \
-                     The release package also ships runtime/ next to the exe.",
-                );
-            });
-
-        if changed {
-            self.refresh_setup();
+        if open {
+            if self.running || self.downloading || self.runtime_downloading {
+                self.status =
+                    "Дождитесь окончания текущего действия, затем добавьте файлы.".to_string();
+            } else {
+                self.pick_files();
+            }
         }
-    }
-
-    fn ui_actions(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let recognize = ui.add_enabled(
-                !self.running
-                    && !self.downloading
-                    && !self.runtime_downloading
-                    && !self.inputs.is_empty(),
-                egui::Button::new(egui::RichText::new("Recognize").strong())
-                    .min_size(egui::vec2(150.0, 32.0)),
-            );
-            if recognize.clicked() {
+        if recognize {
+            if self.can_start() {
                 self.start();
+            } else if let Some(blocker) = self.start_blocker() {
+                self.status = blocker.to_string();
             }
+        }
+        if escape {
             if self.running {
-                if ui
-                    .add(egui::Button::new("Cancel").min_size(egui::vec2(100.0, 32.0)))
-                    .clicked()
-                {
-                    self.cancel.store(true, Ordering::SeqCst);
-                    self.cancelling = true;
-                    self.status = "Cancelling...".to_string();
-                }
-                ui.spinner();
+                self.cancel_job();
+            } else if self.show_help {
+                self.show_help = false;
             }
-            if self.downloading {
-                ui.spinner();
-                ui.label("Downloading model...");
-            }
-            if self.runtime_downloading {
-                ui.spinner();
-                ui.label("Downloading runtime...");
-            }
-            if ui
-                .add_enabled(
-                    !self.running,
-                    egui::Button::new("Open output folder").min_size(egui::vec2(160.0, 32.0)),
-                )
-                .clicked()
-            {
-                let path = self
-                    .last_report
-                    .as_ref()
-                    .map(|report| PathBuf::from(&report.output_dir))
-                    .unwrap_or_else(|| PathBuf::from(self.output_dir.trim()));
-                let target = if path.exists() {
-                    path
-                } else {
-                    path.parent().map(PathBuf::from).unwrap_or(path)
-                };
-                if let Err(error) = open::that(&target) {
-                    self.log(format!("cannot open {}: {error}", target.display()), true);
-                }
-            }
-            if self.cancelling {
-                ui.label("Waiting for the current request to stop...");
-            }
-        });
-
-        ui.add(
-            egui::ProgressBar::new(self.progress)
-                .show_percentage()
-                .animate(self.running || self.downloading || self.runtime_downloading),
-        );
-        ui.label(&self.status);
+        }
     }
 
-    fn ui_log(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Log");
-            if ui.small_button("Copy").clicked() {
-                let text = self
-                    .logs
-                    .iter()
-                    .map(|l| l.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ui.ctx().copy_text(text);
-            }
-            if ui.small_button("Clear").clicked() {
-                self.logs.clear();
-            }
-        });
-        egui::ScrollArea::vertical()
-            .id_salt("log")
-            .stick_to_bottom(true)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if self.logs.is_empty() {
-                    ui.weak("Events and errors appear here.");
-                }
-                for line in &self.logs {
-                    let mut text = egui::RichText::new(&line.text).monospace();
-                    if line.error {
-                        text = text.color(egui::Color32::from_rgb(220, 90, 90));
-                    }
-                    ui.label(text);
-                }
-            });
+    fn update_shots(&mut self, ctx: &egui::Context) {
+        let started = self.started_at;
+        if let Some(shot) = self.shot.as_mut() {
+            demo::drive_screenshot(ctx, shot, started);
+        }
     }
 }
 
@@ -1550,37 +1196,25 @@ impl eframe::App for OcrApp {
                 .collect()
         });
         if !dropped.is_empty() {
+            let has_folder = dropped.iter().any(|path| path.is_dir());
             self.add_paths(dropped);
+            if has_folder {
+                self.recursive = true;
+            }
+            self.status = format!(
+                "Добавлено в список: {}. Выберите папку и нажмите «Распознать».",
+                self.inputs.len()
+            );
         }
 
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("ocr-tool");
-            ui.label("Local OCR for PDF and images · Chandra OCR 2 · llama.cpp");
-            ui.add_space(4.0);
-        });
+        self.handle_shortcuts(ctx);
+        if let Some(theme) = self.forced_theme {
+            ctx.set_theme(theme);
+        }
+        ui::draw(self, ctx);
+        self.update_shots(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.ui_setup(ui);
-            ui.add_space(6.0);
-            ui.heading("Inputs");
-            self.ui_files(ui);
-            ui.add_space(6.0);
-            ui.heading("Settings");
-            self.ui_settings(ui);
-            ui.add_space(8.0);
-            self.ui_actions(ui);
-            if let Some(report) = &self.last_report {
-                ui.add_space(4.0);
-                ui.label(format!(
-                    "{} page(s) written to {}",
-                    report.pages_ok, report.output_dir
-                ));
-            }
-            self.ui_log(ui);
-        });
-
-        if self.running || self.downloading || self.runtime_downloading {
+        if self.running || self.downloading || self.runtime_downloading || self.shot.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -1622,11 +1256,46 @@ fn non_empty_path(value: &str) -> Option<PathBuf> {
     }
 }
 
+#[cfg(test)]
 fn is_pdf_input(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| extension.eq_ignore_ascii_case("pdf"))
         .unwrap_or(false)
+}
+
+fn file_name_of(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn format_pages(pages: usize) -> String {
+    format!(
+        "{pages} {}",
+        ui::plural_ru(pages, "страница", "страницы", "страниц")
+    )
+}
+
+fn runtime_component_label(component: RuntimeComponent) -> &'static str {
+    match component {
+        RuntimeComponent::LlamaVulkan => "движок для видеокарты",
+        RuntimeComponent::LlamaCpu => "движок для процессора",
+        RuntimeComponent::LlamaMetal => "движок для Apple",
+        RuntimeComponent::Pdfium => "просмотр PDF",
+    }
+}
+
+fn runtime_message_ru(runtime: &RuntimeStatus) -> String {
+    if !runtime.llama_ready() {
+        "Не хватает движка распознавания. Скачайте его или укажите папку с движком.".to_string()
+    } else if !runtime.pdfium_ready() {
+        "Движок есть, но не хватает просмотрщика PDF. Скачайте движок или укажите папку."
+            .to_string()
+    } else {
+        "Движок и просмотр PDF готовы.".to_string()
+    }
 }
 
 /// A model download that stopped because the existing canonical file has the
@@ -1639,30 +1308,96 @@ fn download_needs_replace(error: &str) -> bool {
 /// Status-bar text for a failed model download.
 fn download_failure_status(error: &str, cancelled: bool) -> String {
     if cancelled {
-        "Download cancelled; the .part file is kept and the next attempt resumes".to_string()
+        "Загрузка остановлена. Следующая попытка продолжится с места остановки.".to_string()
     } else if download_needs_replace(error) {
-        "Model files are incomplete or different; use Replace / Re-download to fetch the pinned files again."
+        "Файлы модели повреждены или отличаются. Нажмите «Заменить…», чтобы скачать заново."
             .to_string()
     } else {
-        "Model download failed. See the log.".to_string()
+        "Не удалось скачать модель. Проверьте подключение к интернету и повторите.".to_string()
     }
 }
 
-/// Map a full error chain to a short status-bar sentence. The raw chain (for
-/// example `os error 3`) goes to the log only; the main status must stay
-/// actionable on the first run.
-fn friendly_failure(error: &str) -> String {
+/// Map a full error chain to a user-facing cause and the action that fixes it.
+fn classify_failure(error: &str) -> FailureKind {
     let lower = error.to_ascii_lowercase();
     if lower.contains("model files not found")
         || (lower.contains("model") && lower.contains("incomplete"))
+        || (lower.contains("model directory") && lower.contains("cannot find"))
     {
-        "Model files not found or incomplete. Use Download model or choose a folder.".to_string()
-    } else if lower.contains("pdfium not found") {
-        "PDFium not found; choose the runtime folder or set OCR_PDFIUM.".to_string()
-    } else if lower.contains("llama-server") && lower.contains("not found") {
-        "Runtime not found: llama-server was not found; choose the runtime folder.".to_string()
+        FailureKind::Model
+    } else if lower.contains("pdfium") {
+        FailureKind::Pdfium
+    } else if lower.contains("llama-server") || lower.contains("runtime not found") {
+        FailureKind::Runtime
+    } else if lower.contains("cannot create output")
+        || lower.contains("output directory")
+        || lower.contains("permission denied")
+        || lower.contains("access is denied")
+        || lower.contains("os error 5")
+        || (lower.contains("denied") && lower.contains("write"))
+    {
+        FailureKind::Output
+    } else if lower.contains("invalid --pages") || lower.contains("invalid page") {
+        FailureKind::Pages
+    } else if lower.contains("password") || lower.contains("encrypted") {
+        FailureKind::Password
+    } else if lower.contains("input does not exist")
+        || lower.contains("unsupported input")
+        || lower.contains("no supported files")
+        || lower.contains("cannot walk")
+        || lower.contains("cannot read")
+        || lower.contains("no input files")
+    {
+        FailureKind::File
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        FailureKind::Timeout
     } else {
-        "Failed. See the log for details.".to_string()
+        FailureKind::Unknown
+    }
+}
+
+/// Short Russian sentence for the main status. The raw chain (for example
+/// `os error 3`) goes to the log only; the main status must stay actionable on
+/// the first run.
+fn friendly_failure(error: &str) -> String {
+    match classify_failure(error) {
+        FailureKind::Model => {
+            "Не хватает модели распознавания. Скачайте её (около 3,4 ГБ) или укажите \
+             папку с моделью."
+                .to_string()
+        }
+        FailureKind::Runtime => {
+            "Не хватает движка распознавания. Скачайте его (около 69 МБ) или укажите \
+             папку с движком."
+                .to_string()
+        }
+        FailureKind::Pdfium => {
+            "Для PDF нужен просмотрщик PDF. Скачайте движок или укажите папку, где он \
+             уже есть."
+                .to_string()
+        }
+        FailureKind::File => {
+            "Не удалось прочитать файл. Он не изменён. Выберите другой файл.".to_string()
+        }
+        FailureKind::Output => "Не могу писать в эту папку. Выберите другую папку.".to_string(),
+        FailureKind::Password => {
+            "PDF защищён паролем. Введите пароль в разделе «PDF с паролем?».".to_string()
+        }
+        FailureKind::Pages => {
+            "Не получилось разобрать номера страниц. Укажите их так: 1-5,7 — или \
+             оставьте поле пустым."
+                .to_string()
+        }
+        FailureKind::Timeout => {
+            "Распознавание заняло слишком много времени. Попробуйте ещё раз или \
+             уменьшите число страниц."
+                .to_string()
+        }
+        FailureKind::Unknown => {
+            "Не получилось завершить распознавание. Документы не изменены. Попробуйте \
+             ещё раз."
+                .to_string()
+        }
     }
 }
 
@@ -1725,22 +1460,57 @@ mod tests {
         let raw = "Model files not found in C:\\Users\\x\\AppData\\Local\\ocr-tool\\models\\chandra-ocr-2; use Download model or choose a folder: cannot read model directory C:\\Users\\x\\AppData\\Local\\ocr-tool\\models\\chandra-ocr-2: The system cannot find the path specified. (os error 3)";
         let status = friendly_failure(raw);
         assert!(!status.contains("os error"), "{status}");
-        assert!(status.contains("Model files not found"), "{status}");
+        assert!(status.contains("модели"), "{status}");
+        assert_eq!(classify_failure(raw), FailureKind::Model);
 
         let runtime = friendly_failure(
             "llama-server executable not found (device auto).\nSearched: C:\\runtime",
         );
-        assert!(runtime.contains("Runtime not found"), "{runtime}");
+        assert!(runtime.contains("движка"), "{runtime}");
+        assert_eq!(
+            classify_failure("llama-server executable not found"),
+            FailureKind::Runtime
+        );
 
         let pdfium = friendly_failure(
             "PDFium not found; choose the runtime folder or set OCR_PDFIUM: no PDFium library",
         );
-        assert!(pdfium.contains("PDFium not found"), "{pdfium}");
+        assert!(pdfium.contains("просмотрщик"), "{pdfium}");
+        assert_eq!(classify_failure("PDFium not found"), FailureKind::Pdfium);
 
         assert_eq!(
             friendly_failure("something unexpected\nsecond line"),
-            "Failed. See the log for details."
+            "Не получилось завершить распознавание. Документы не изменены. Попробуйте ещё раз."
         );
+    }
+
+    #[test]
+    fn common_failures_map_to_calm_russian_messages() {
+        let output = friendly_failure(
+            "cannot create output directory D:\\readonly: Access is denied. (os error 5)",
+        );
+        assert!(output.contains("папку"), "{output}");
+        assert!(!output.contains("os error"), "{output}");
+        assert_eq!(
+            classify_failure("cannot create output directory D:\\readonly: Access is denied."),
+            FailureKind::Output
+        );
+
+        let file = friendly_failure("input does not exist: C:\\gone\\scan.pdf");
+        assert!(file.contains("файл"), "{file}");
+        assert_eq!(
+            classify_failure("input does not exist: C:\\gone\\scan.pdf"),
+            FailureKind::File
+        );
+
+        let pages = friendly_failure("invalid --pages: 0");
+        assert!(pages.contains("страниц"), "{pages}");
+
+        let password = friendly_failure("PDF is encrypted; a password is required");
+        assert!(password.contains("паролем"), "{password}");
+
+        let timeout = friendly_failure("request timed out after 600 s");
+        assert!(timeout.contains("времени"), "{timeout}");
     }
 
     #[test]
@@ -1873,12 +1643,12 @@ mod tests {
                    the pinned file into C:\\models";
         assert!(download_needs_replace(raw));
         let status = download_failure_status(raw, false);
-        assert!(status.contains("Replace / Re-download"), "{status}");
+        assert!(status.contains("Заменить"), "{status}");
         assert!(!status.contains("--force"), "{status}");
-        assert!(download_failure_status("download cancelled", true).contains("cancelled"));
+        assert!(download_failure_status("download cancelled", true).contains("остановлена"));
         assert_eq!(
             download_failure_status("network down", false),
-            "Model download failed. See the log."
+            "Не удалось скачать модель. Проверьте подключение к интернету и повторите."
         );
     }
 
@@ -1886,5 +1656,104 @@ mod tests {
     fn pdf_inputs_are_detected_for_the_pdfium_guard() {
         assert!(is_pdf_input(Path::new("a.PDF")));
         assert!(!is_pdf_input(Path::new("a.png")));
+    }
+
+    #[test]
+    fn recognize_is_disabled_until_setup_files_and_folder_are_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime");
+        let llama = runtime.join("llama-cpu");
+        std::fs::create_dir_all(&llama).unwrap();
+        let server = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
+        std::fs::write(llama.join(server), b"fake").unwrap();
+        let pdfium = runtime_pdfium_candidate(&runtime);
+        std::fs::create_dir_all(pdfium.parent().unwrap()).unwrap();
+        std::fs::write(&pdfium, b"fake").unwrap();
+
+        let mut app = OcrApp::new();
+        app.model_status = ModelStatus::Ready {
+            dir: tmp.path().to_path_buf(),
+            paths: ocr_core::ModelPaths {
+                dir: tmp.path().to_path_buf(),
+                model: tmp.path().join("model.gguf"),
+                mmproj: tmp.path().join("mmproj.gguf"),
+            },
+            model_bytes: 0,
+            mmproj_bytes: 0,
+        };
+        app.runtime = runtime_status(Some(&runtime), Some(&pdfium));
+        assert!(app.setup_complete());
+        assert!(!app.can_start(), "no files yet");
+        assert_eq!(app.start_blocker(), Some("Сначала добавьте файлы."));
+
+        app.inputs.push(tmp.path().join("scan.pdf"));
+        assert!(app.can_start());
+        assert_eq!(app.start_blocker(), None);
+
+        app.output_dir.clear();
+        assert!(!app.can_start(), "empty output folder disables Recognize");
+        assert_eq!(app.start_blocker(), Some("Выберите папку для сохранения."));
+    }
+
+    #[test]
+    fn keyboard_shortcuts_are_recognized() {
+        let ctx = egui::Context::default();
+        let press = |key: egui::Key, modifiers: egui::Modifiers| egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+
+        ctx.begin_pass(press(egui::Key::O, egui::Modifiers::CTRL));
+        let open = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::O,
+            ))
+        });
+        let _ = ctx.end_pass();
+        assert!(open, "Ctrl+O must be consumed as Add files");
+
+        ctx.begin_pass(press(egui::Key::Enter, egui::Modifiers::CTRL));
+        let recognize = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::Enter,
+            ))
+        });
+        let _ = ctx.end_pass();
+        assert!(recognize, "Ctrl+Enter must be consumed as Recognize");
+
+        ctx.begin_pass(press(egui::Key::Escape, egui::Modifiers::NONE));
+        let cancel =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let _ = ctx.end_pass();
+        assert!(cancel, "Esc must be consumed as Cancel");
+    }
+
+    #[test]
+    fn leftover_english_backend_messages_are_not_shown_raw() {
+        for error in [
+            "Model files not found in C:\\x (os error 3)",
+            "llama-server executable not found (device auto)",
+            "PDFium not found: no PDFium library",
+            "unexpected failure chain",
+        ] {
+            let message = friendly_failure(error);
+            assert!(!message.contains("os error"), "{message}");
+            assert!(
+                message.chars().any(|ch| ('А'..='я').contains(&ch)),
+                "message must be Russian: {message}"
+            );
+        }
     }
 }

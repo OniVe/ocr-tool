@@ -2687,12 +2687,18 @@ name = "ocr-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "eframe",
  "egui",
+ "image",
  "ocr-app",
  "ocr-core",
+ "ocr-engine",
+ "ocr-pdf",
  "open",
  "rfd",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
