@@ -19,34 +19,50 @@
 
 ## Быстрый старт (Windows)
 
+Соберите (или распакуйте готовый дистрибутив) и запустите GUI — CLI не нужен:
+
 ```powershell
-# 1. Runtime: llama-server (Vulkan + CPU fallback) и PDFium -> runtime/windows-x64/
-.\scripts\fetch-runtime.ps1
+cargo build --release
+.\target\release\ocr-tool-gui.exe
+```
 
-# 2. Модель (~3,4 ГБ, докачка, проверка SHA-256)
+При первом запуске GUI показывает две независимые панели:
+
+1. **Download model (~3.4 GB)** — закреплённая пара Chandra Q4_K_M + mmproj,
+   с докачкой и проверкой SHA-256, в app-data (или редактируемый Model dir).
+2. **Download runtime (~70 MB)** — llama-vulkan, llama-cpu и PDFium в
+   редактируемую **Runtime folder** (по умолчанию
+   `%LOCALAPPDATA%\ocr-tool\runtime\windows-x64`; на macOS ~25 MB).
+
+У обеих загрузок есть прогресс и отмена; пока идёт любая, Recognize и вторая
+кнопка недоступны. Чтобы держать всё в одной папке, задайте и Model dir, и
+Runtime folder.
+
+CLI-паритет (для роботов/скриптов):
+
+```powershell
+cargo run --release -p ocr-cli -- runtime download
 cargo run --release -p ocr-cli -- models download
-
-# 3. Проверка компонентов
 cargo run --release -p ocr-cli -- doctor
-
-# 4. Распознавание
 cargo run --release -p ocr-cli -- ocr samples\invoice_scan_ru.jpg -o out
 cargo run --release -p ocr-cli -- ocr samples\contract_ru.pdf -o out --pages 1-2
 ```
 
-CLI не обязателен: `target\release\ocr-tool-gui.exe` сам проверяет компоненты
-при старте. Если модели нет, GUI предлагает **Download model (~3.4 GB)**
-(прогресс, отмена, докачка `.part`; уже лежащие файлы, в том числе
+GUI самодостаточен: если модели нет, он предлагает **Download model
+(~3.4 GB)** (прогресс, отмена, докачка `.part`; уже лежащие файлы, в том числе
 `chandra-q4.gguf` + `mmproj.gguf`, не перекачиваются), **Choose existing model
-folder…** и **Open model folder**. Если нет runtime — панель «Runtime not
-found» с выбором папки. Если файлы есть, но неверного размера, кнопка
-**Replace / Re-download…** (с подтверждением) удаляет их и заново скачивает
-закреплённую пару.
+folder…** и **Open model folder**. Если нет runtime — поле **Runtime folder** и
+кнопку **Download runtime (~70 MB)**. Обе загрузки продолжаются с `.part` и
+узнают уже установленные компоненты, поэтому ничего не качается дважды. Если
+файлы модели есть, но неверного размера, **Replace / Re-download…** (с
+подтверждением) удаляет их и заново скачивает закреплённую пару; для готового
+runtime в Advanced paths есть **Re-download runtime**.
 
 Linux/macOS:
 
 ```bash
-./scripts/fetch-runtime.sh
+cargo build --release
+cargo run --release -p ocr-cli -- runtime download
 cargo run --release -p ocr-cli -- models download
 cargo run --release -p ocr-cli -- doctor
 ```
@@ -60,9 +76,11 @@ $env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
 ```
 
 или флагами `--llama-dir`, `--model-dir`, `--pdfium`; в GUI — поля Model dir,
-llama dir, PDFium в разделе «Advanced paths». Один выбор **Runtime dir**
-заполняет каталог llama-server и библиотеку PDFium из
-`runtime/<os>-<arch>/{llama-*,pdfium}`.
+llama dir, PDFium в разделе «Advanced paths». Поле **Runtime folder** в панели
+Runtime (и тот же выбор в Advanced) заполняет каталог llama-server и библиотеку
+PDFium из `runtime/<os>-<arch>/{llama-*,pdfium}`; в эту же папку кнопка
+**Download runtime** ставит закреплённые архивы. Папки модели и runtime
+независимы — задайте обе, если хотите держать всё вместе.
 
 ## CLI
 
@@ -76,6 +94,8 @@ ocr-tool ocr <inputs...> -o <dir>
 ocr-tool doctor [--model-dir PATH] [--llama-dir PATH] [--json]
 ocr-tool models download [--dir PATH] [--force]
 ocr-tool models verify [--dir PATH] [--deep]
+ocr-tool runtime download [--dir PATH] [--force]
+ocr-tool runtime verify [--dir PATH]
 ocr-tool gui
 ```
 
@@ -96,6 +116,14 @@ ocr-tool gui
   `--deep` дополнительно считает SHA-256 (читает ~3,4 ГБ). `models download`
   узнаёт те же переименованные пары, что и OCR (`chandra-q4.gguf` +
   `mmproj.gguf`), и не качает их повторно.
+- `runtime download` ставит закреплённые сборки llama.cpp b12535
+  (Vulkan/Metal GPU + CPU fallback) и PDFium 8165 в `--dir` (по умолчанию
+  `%LOCALAPPDATA%\ocr-tool\runtime\<tag>`). Архивы проверяются по размеру и
+  SHA-256 до распаковки, `.part` продолжается с места отмены, компонент
+  распаковывается во временный каталог и переименовывается на место.
+  `runtime verify` проверяет установленную папку офлайн и выходит с кодом `2`,
+  если компонента нет; ошибка `runtime download` — код `3`. Обе команды
+  принимают `--dir PATH`; модель и runtime ставятся независимо.
 
 Имена: `<stem>.md`, `<stem>.html`; при коллизии — `-2`, `-3`. Зарезервированные
 имена Windows (`CON`, `NUL`, `COM1`, …) получают суффикс `_`. Для каждого
@@ -125,18 +153,26 @@ GUI самодостаточен при первом запуске — CLI и �
   `.part` и заново скачивает закреплённую пару; это выход GUI из состояния
   «incomplete / неверный размер», которое обычная загрузка намеренно не
   перезаписывает.
-- **Нет runtime** — панель «Runtime not found» (llama-server) и отдельная
-  панель «PDFium not found»; при отсутствии обоих компонентов видны обе.
-  Каждая предлагает **Choose runtime folder…**. Выбранная папка заполняет
-  llama dir (`llama-vulkan` / `llama-cpu`) и PDFium (`pdfium/bin/<lib>`); в
-  дистрибутиве папка `runtime` лежит рядом с exe и находится автоматически.
-  Сырой `os error 3` в главный статус не попадает.
+- **Нет runtime** — панель «Runtime not found» показывает редактируемое поле
+  **Runtime folder** (подсказка — платформенная папка по умолчанию), кнопки
+  **Choose folder…**, **Open folder** и **Download runtime (~70 MB; на macOS
+  ~25 MB)**. Загрузка скачивает llama-vulkan, llama-cpu и PDFium для текущей
+  платформы, сверяет закреплённый SHA-256 и ставит их в выбранную папку; видны
+  прогресс, статус по компонентам и отмена, частичный `.part` продолжается.
+  После успеха папка заполняет llama dir (`llama-vulkan` / `llama-cpu`) и
+  PDFium (`pdfium/bin|lib/<lib>`), статус пишет
+  «Runtime ready … (downloaded to <path>)». В дистрибутиве папка `runtime`
+  рядом с exe по-прежнему находится автоматически. Сырой `os error 3` в
+  главный статус не попадает.
+- **Независимые загрузки** — у модели и runtime свои кнопки и отмена; пока идёт
+  любая, Recognize и вторая кнопка недоступны. **Re-download runtime** (с
+  подтверждением) находится в Advanced paths, когда runtime уже готов.
 - **Источник PDFium** — «Runtime ready» показывает, откуда взята библиотека:
   выбранная папка runtime/путь, `OCR_PDFIUM` или автопоиск рядом с приложением.
   Если `OCR_PDFIUM` перекрывает встроенный runtime, выводится предупреждение.
 - **Advanced paths** разворачивается автоматически, пока setup не завершён
   (нет модели, llama-server или PDFium); остаются опциональные поля Model dir /
-  llama dir / PDFium / Runtime dir.
+  llama dir / PDFium / Runtime folder (то же поле, что в панели Runtime).
 - Распознавание: файлы/папка (можно перетащить), выходная папка, формат,
   устройство, DPI, диапазон страниц, пароль PDF (скрытое поле), рекурсия;
   кнопка «Recognize» запускает фоновый поток, есть прогресс, лог, отмена и
@@ -181,9 +217,13 @@ cargo build --release
 Упаковка (модель не входит): `scripts/package.ps1` или `scripts/package.sh`.
 
 `scripts/fetch-runtime.ps1|.sh` скачивают закреплённые llama.cpp b12535 и
-PDFium 8165 в `runtime/<target>/`. `scripts/package.ps1|.sh` складывают exe,
-runtime, README и NOTICE в `dist/`. GitHub Actions собирает артефакты для
-Windows/Ubuntu/macOS и не публикует релиз; подписи кода нет.
+PDFium 8165 в `runtime/<target>/` для упаковки; пользователям GUI/CLI они не
+нужны (**Download runtime** / `runtime download` ставят тот же layout).
+`scripts/package.ps1|.sh` складывают exe, runtime, README и NOTICE в `dist/`.
+GitHub Actions собирает артефакты для Windows/Ubuntu/macOS и не публикует
+релиз; подписи кода нет. `scripts/acceptance-runtime.ps1` — реальный E2E
+загрузки runtime (~69 МБ): SHA-256 архивов, `llama-server --version`, `doctor`,
+CPU OCR.
 
 ## Производительность
 
@@ -212,9 +252,9 @@ CPU — аварийный fallback, а не рабочий режим для п
 - Страницы обрабатываются последовательно, без параллелизма.
 - Linux/macOS локально не проверялись; CI-конфигурация приложена, но не
   запускалась.
-- Модель GUI скачивает сама; внешний runtime (llama-server + PDFium) по-прежнему
-  ставится `scripts/fetch-runtime` или идёт в составе релиза (`runtime/` рядом
-  с exe) и выбирается в GUI кнопкой выбора папки runtime.
+- GUI и CLI сами скачивают и модель, и runtime (llama-server + PDFium);
+  дистрибутив дополнительно содержит `runtime/` рядом с exe. Скрытых скриптов
+  установки нет.
 - Лицензия весов OpenRAIL-M; коммерческое использование не гарантируется.
 - `samples/` содержит персональные данные и исключён из git, кроме `SOURCES.md`.
 
@@ -222,5 +262,7 @@ CPU — аварийный fallback, а не рабочий режим для п
 
 Распознавание полностью локальное. Сеть используется только для явных
 загрузок модели (кнопка GUI **Download model** или `models download`,
-Hugging Face) и `fetch-runtime` (GitHub). Телеметрии нет.
+Hugging Face) и runtime (кнопка GUI **Download runtime** или
+`runtime download`, GitHub), а также упаковочных `fetch-runtime`. Телеметрии
+нет.
 Код на Rust — MIT; сторонние компоненты сохраняют свои лицензии, см. [NOTICE](NOTICE).

@@ -157,6 +157,35 @@ pub fn default_model_dir() -> PathBuf {
     app_data_dir().join(DEFAULT_MODEL_SUBDIR)
 }
 
+/// Platform tag of a runtime with pinned downloads. Mirrors the packaging
+/// layout (`runtime/<tag>`); build targets without pinned archives report
+/// `unsupported`.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub const RUNTIME_TAG: &str = "windows-x64";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const RUNTIME_TAG: &str = "linux-x64";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const RUNTIME_TAG: &str = "macos-arm64";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const RUNTIME_TAG: &str = "macos-x64";
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+)))]
+pub const RUNTIME_TAG: &str = "unsupported";
+
+/// Where the GUI/CLI install the downloaded runtime by default:
+/// `<app-data>/ocr-tool/runtime/<RUNTIME_TAG>`. This is deliberately separate
+/// from the model directory; both are shown in the GUI.
+pub fn default_runtime_dir() -> PathBuf {
+    app_data_dir()
+        .join("ocr-tool")
+        .join("runtime")
+        .join(RUNTIME_TAG)
+}
+
 /// Locate the two GGUF files in a directory.
 ///
 /// The canonical names are preferred. For local testing the directory may hold
@@ -305,6 +334,15 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(tag, "windows-x64");
         }
+        if RUNTIME_TAG != "unsupported" {
+            assert_eq!(RUNTIME_TAG, tag, "the pinned tag must match packaging");
+        }
+    }
+
+    #[test]
+    fn default_runtime_dir_is_app_data_runtime_tag() {
+        let dir = default_runtime_dir();
+        assert!(dir.ends_with(PathBuf::from("ocr-tool").join("runtime").join(RUNTIME_TAG)));
     }
 
     #[test]

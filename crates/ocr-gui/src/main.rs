@@ -5,11 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ocr_app::download::{human_bytes, DownloadProgress, REPO_URL};
+use ocr_app::runtime::{download_runtime, runtime_download_mb, RuntimeInstall, RuntimeProgress};
 use ocr_app::setup::{
     model_status, pdfium_for_runtime, runtime_status, ModelStatus, PdfiumSource, RuntimeStatus,
 };
 use ocr_app::{download_models_cancellable, run_job, JobOptions, JobReport};
-use ocr_core::{resolve_model_dir, Device, OutputFormat, ProgressEvent, MODEL_ENV};
+use ocr_core::{
+    default_runtime_dir, resolve_model_dir, Device, OutputFormat, ProgressEvent, MODEL_ENV,
+};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -39,6 +42,8 @@ enum Msg {
     Done(Result<JobReport, String>),
     Download(DownloadProgress),
     DownloadDone(Result<Vec<PathBuf>, String>),
+    Runtime(RuntimeProgress),
+    RuntimeDone(Result<RuntimeInstall, String>),
 }
 
 /// Sends `Msg::Done` when the worker disappears, including a panic unwind that
@@ -97,6 +102,33 @@ impl Drop for DownloadGuard {
     }
 }
 
+/// Same safety net for the runtime download thread.
+struct RuntimeGuard {
+    tx: Sender<Msg>,
+    sent: bool,
+}
+
+impl RuntimeGuard {
+    fn new(tx: Sender<Msg>) -> Self {
+        Self { tx, sent: false }
+    }
+
+    fn finish(&mut self, result: Result<RuntimeInstall, String>) {
+        let _ = self.tx.send(Msg::RuntimeDone(result));
+        self.sent = true;
+    }
+}
+
+impl Drop for RuntimeGuard {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.tx.send(Msg::RuntimeDone(Err(
+                "runtime download thread panicked before reporting a result".to_string(),
+            )));
+        }
+    }
+}
+
 struct OcrApp {
     inputs: Vec<PathBuf>,
     output_dir: String,
@@ -125,10 +157,15 @@ struct OcrApp {
     setup_key: (String, String, String, String),
 
     downloading: bool,
+    runtime_downloading: bool,
     download_cancel: Arc<AtomicBool>,
+    runtime_cancel: Arc<AtomicBool>,
     download_text: String,
+    runtime_text: String,
     download_last_percent: Option<u32>,
+    runtime_last_percent: Option<u32>,
     confirm_replace: bool,
+    confirm_runtime_replace: bool,
 }
 
 impl OcrApp {
@@ -170,10 +207,15 @@ impl OcrApp {
             },
             setup_key: (String::new(), String::new(), String::new(), String::new()),
             downloading: false,
+            runtime_downloading: false,
             download_cancel: Arc::new(AtomicBool::new(false)),
+            runtime_cancel: Arc::new(AtomicBool::new(false)),
             download_text: String::new(),
+            runtime_text: String::new(),
             download_last_percent: None,
+            runtime_last_percent: None,
             confirm_replace: false,
+            confirm_runtime_replace: false,
         };
         app.refresh_setup();
         app
@@ -211,8 +253,8 @@ impl OcrApp {
     fn refresh_setup(&mut self) {
         let model_dir = self.resolved_model_dir();
         self.model_status = model_status(&model_dir);
-        let llama = non_empty_path(&self.llama_dir);
-        let pdfium = non_empty_path(&self.pdfium);
+        let llama = self.resolved_llama_dir();
+        let pdfium = self.resolved_pdfium();
         self.runtime = runtime_status(llama.as_deref(), pdfium.as_deref());
         self.setup_key = self.path_key();
     }
@@ -229,6 +271,22 @@ impl OcrApp {
         resolve_model_dir(explicit.as_deref(), env.as_deref())
     }
 
+    /// Folder the next Download runtime goes to: the edited field or the
+    /// platform app-data folder. Never a hidden path.
+    fn target_runtime_dir(&self) -> PathBuf {
+        non_empty_path(&self.runtime_dir).unwrap_or_else(default_runtime_dir)
+    }
+
+    /// The runtime folder participates in discovery even before the explicit
+    /// llama dir / PDFium fields are filled (the user may have typed it).
+    fn resolved_llama_dir(&self) -> Option<PathBuf> {
+        non_empty_path(&self.llama_dir).or_else(|| non_empty_path(&self.runtime_dir))
+    }
+
+    fn resolved_pdfium(&self) -> Option<PathBuf> {
+        non_empty_path(&self.pdfium).or_else(|| non_empty_path(&self.runtime_dir))
+    }
+
     fn setup_complete(&self) -> bool {
         // PDFium is part of the setup: a runtime with llama-server but no
         // PDFium still fails on every PDF, so keep the paths (and the PDFium
@@ -237,7 +295,7 @@ impl OcrApp {
     }
 
     fn start(&mut self) {
-        if self.running || self.downloading || self.inputs.is_empty() {
+        if self.running || self.downloading || self.runtime_downloading || self.inputs.is_empty() {
             return;
         }
         let output_dir = PathBuf::from(self.output_dir.trim());
@@ -324,7 +382,7 @@ impl OcrApp {
     }
 
     fn start_download_with_force(&mut self, force: bool) {
-        if self.downloading || self.running {
+        if self.downloading || self.runtime_downloading || self.running {
             return;
         }
         self.maybe_refresh_setup();
@@ -388,6 +446,89 @@ impl OcrApp {
         }
     }
 
+    /// Called when the Runtime folder text field changes. The folder drives
+    /// both llama-server discovery and the PDFium lookup until the user
+    /// overrides them with the advanced fields.
+    fn apply_runtime_dir_text(&mut self) {
+        let trimmed = self.runtime_dir.trim().to_string();
+        if trimmed.is_empty() {
+            self.llama_dir.clear();
+            self.pdfium.clear();
+        } else {
+            let folder = PathBuf::from(&trimmed);
+            self.llama_dir = trimmed;
+            self.pdfium = pdfium_for_runtime(&folder)
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+        }
+        self.refresh_setup();
+    }
+
+    /// Download llama-vulkan + llama-cpu + PDFium into the runtime folder.
+    /// The model download and the runtime download are independent and never
+    /// run at the same time.
+    fn start_runtime_download(&mut self, force: bool) {
+        if self.downloading || self.runtime_downloading || self.running {
+            return;
+        }
+        self.maybe_refresh_setup();
+        let dir = self.target_runtime_dir();
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.status = format!("Cannot create runtime folder {}", dir.display());
+            self.log(
+                format!("error: cannot create {}: {error}", dir.display()),
+                true,
+            );
+            return;
+        }
+        self.runtime_downloading = true;
+        self.confirm_runtime_replace = false;
+        self.progress = 0.0;
+        self.runtime_text = "Starting runtime download...".to_string();
+        self.runtime_last_percent = None;
+        self.status = if force {
+            format!("Re-downloading runtime to {}...", dir.display())
+        } else {
+            format!("Downloading runtime to {}...", dir.display())
+        };
+        self.log(
+            format!(
+                "runtime download{}: llama.cpp b12535 + pdfium 8165 -> {}",
+                if force { " (replace)" } else { "" },
+                dir.display()
+            ),
+            false,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.runtime_cancel = cancel.clone();
+
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = std::sync::mpsc::channel();
+        self.rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut guard = RuntimeGuard::new(tx.clone());
+            let mut emit = |progress: RuntimeProgress| {
+                let _ = tx.send(Msg::Runtime(progress));
+            };
+            let result = download_runtime(&dir, force, &cancel, &mut emit)
+                .map_err(|error| format!("{error:#}"));
+            guard.finish(result);
+        });
+    }
+
+    fn open_runtime_folder(&mut self) {
+        let dir = self.target_runtime_dir();
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.log(
+                format!("error: cannot create {}: {error}", dir.display()),
+                true,
+            );
+            return;
+        }
+        if let Err(error) = open::that(&dir) {
+            self.log(format!("cannot open {}: {error}", dir.display()), true);
+        }
+    }
+
     fn open_model_folder(&mut self) {
         let dir = self.resolved_model_dir();
         if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -428,6 +569,17 @@ impl OcrApp {
                                 "Download worker stopped unexpectedly. See the log.".to_string();
                             self.log(
                                 "error: download thread exited without reporting a result"
+                                    .to_string(),
+                                true,
+                            );
+                        }
+                        if self.runtime_downloading {
+                            self.runtime_downloading = false;
+                            self.status =
+                                "Runtime download worker stopped unexpectedly. See the log."
+                                    .to_string();
+                            self.log(
+                                "error: runtime download thread exited without reporting a result"
                                     .to_string(),
                                 true,
                             );
@@ -520,7 +672,96 @@ impl OcrApp {
                     self.rx = None;
                     return;
                 }
+                Msg::Runtime(progress) => self.handle_runtime_progress(progress),
+                Msg::RuntimeDone(result) => {
+                    self.runtime_downloading = false;
+                    match result {
+                        Ok(install) => {
+                            self.progress = 1.0;
+                            let target = install.dir.clone();
+                            self.apply_runtime_dir(target.clone());
+                            self.log(
+                                format!("runtime gpu: {}", install.llama_gpu.display()),
+                                false,
+                            );
+                            self.log(
+                                format!("runtime cpu: {}", install.llama_cpu.display()),
+                                false,
+                            );
+                            self.log(
+                                format!("runtime pdfium: {}", install.pdfium.display()),
+                                false,
+                            );
+                            self.status = if self.runtime.is_ready() {
+                                format!(
+                                    "Runtime ready: {} llama-server candidate(s) (downloaded to {})",
+                                    self.runtime.llama.len(),
+                                    target.display()
+                                )
+                            } else {
+                                self.runtime.message()
+                            };
+                            let error = !self.runtime.is_ready();
+                            self.log(self.status.clone(), error);
+                        }
+                        Err(error) => {
+                            let cancelled = error.to_ascii_lowercase().contains("cancel");
+                            self.status = if cancelled {
+                                "Runtime download cancelled; partial .part files resume on the next attempt"
+                                    .to_string()
+                            } else {
+                                "Runtime download failed. See the log.".to_string()
+                            };
+                            self.log(format!("error: {error}"), true);
+                            self.refresh_setup();
+                        }
+                    }
+                    self.rx = None;
+                    return;
+                }
             }
+        }
+    }
+
+    fn handle_runtime_progress(&mut self, progress: RuntimeProgress) {
+        let total = progress.total.max(1);
+        let fraction = (progress.downloaded as f32 / total as f32).min(1.0);
+        self.progress = fraction;
+        let percent = (fraction * 100.0).round() as u32;
+        let suffix = if progress.skipped {
+            " (already present)"
+        } else {
+            ""
+        };
+        self.runtime_text = format!(
+            "{}: {} / {} ({percent}%){suffix}",
+            progress.component.as_str(),
+            human_bytes(progress.downloaded),
+            human_bytes(progress.total)
+        );
+        self.status = if progress.done {
+            format!(
+                "Runtime {}: {}{suffix}",
+                progress.component.as_str(),
+                if progress.skipped {
+                    "already present"
+                } else {
+                    "installed"
+                }
+            )
+        } else {
+            format!(
+                "Downloading runtime {}: {percent}%",
+                progress.component.as_str()
+            )
+        };
+        let bucket = percent / 10;
+        if progress.done
+            || progress.skipped
+            || self.runtime_last_percent.map(|last| last / 10) != Some(bucket)
+        {
+            self.runtime_last_percent = Some(percent);
+            self.log(self.runtime_text.clone(), false);
         }
     }
 
@@ -689,7 +930,7 @@ impl OcrApp {
                     ui.label(detail);
                 }
                 ui.horizontal(|ui| {
-                    let can_start = !self.downloading && !self.running;
+                    let can_start = !self.downloading && !self.runtime_downloading && !self.running;
                     if ui
                         .add_enabled(
                             can_start,
@@ -703,7 +944,7 @@ impl OcrApp {
                     }
                     if ui
                         .add_enabled(
-                            !self.downloading,
+                            !self.downloading && !self.runtime_downloading,
                             egui::Button::new("Choose existing model folder..."),
                         )
                         .clicked()
@@ -726,7 +967,7 @@ impl OcrApp {
                 // cannot be fixed by a plain download: the downloader refuses
                 // to overwrite it. Offer the replace path the GUI can actually
                 // execute instead of only mentioning `--force`.
-                if !self.downloading && !self.running {
+                if !self.downloading && !self.runtime_downloading && !self.running {
                     if !self.confirm_replace {
                         if ui.button("Replace / Re-download…").clicked() {
                             self.confirm_replace = true;
@@ -769,48 +1010,79 @@ impl OcrApp {
         }
 
         let runtime = self.runtime.clone();
-        let mut runtime_trouble = false;
-        if !runtime.llama_ready() {
-            runtime_trouble = true;
+        let runtime_ready = runtime.is_ready();
+        let runtime_dir = self.target_runtime_dir();
+        let busy = self.downloading || self.runtime_downloading || self.running;
+
+        if !runtime_ready {
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.heading("Runtime not found");
-                ui.label(
-                    "llama-server was not found. In the release build the runtime folder sits \
-                     next to ocr-tool-gui.exe; otherwise choose the folder that contains \
-                     llama-vulkan / llama-cpu and pdfium (or set OCR_LLAMA_SERVER).",
-                );
+                ui.heading(if runtime.llama_ready() {
+                    "Runtime incomplete: PDFium not found"
+                } else {
+                    "Runtime not found"
+                });
+                ui.label(format!(
+                    "llama-server (GPU build plus CPU fallback) and PDFium (~{} MB) are \
+                     downloaded once into the runtime folder below. No CLI or script is needed.",
+                    runtime_download_mb()
+                        .map(|mb| mb.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ));
+                ui.horizontal(|ui| {
+                    ui.label("Runtime folder");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.runtime_dir)
+                                .hint_text(default_runtime_dir().display().to_string())
+                                .desired_width(420.0),
+                        )
+                        .changed()
+                    {
+                        self.apply_runtime_dir_text();
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Choose folder…"))
+                        .clicked()
+                    {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.apply_runtime_dir(folder);
+                        }
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Open folder"))
+                        .clicked()
+                    {
+                        self.open_runtime_folder();
+                    }
+                });
                 if let Some(warning) = runtime.llama_warnings.first() {
                     ui.label(warning);
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Choose runtime folder...").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.apply_runtime_dir(folder);
-                        }
+                if !runtime.pdfium_ready() {
+                    if let Err(error) = &runtime.pdfium {
+                        ui.label(error);
                     }
-                });
+                }
+                let label = match runtime_download_mb() {
+                    Some(mb) => format!("Download runtime (~{mb} MB)"),
+                    None => "Download runtime".to_string(),
+                };
+                if ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(egui::RichText::new(label).strong()),
+                    )
+                    .clicked()
+                {
+                    self.start_runtime_download(false);
+                }
+                ui.weak(format!(
+                    "Installs llama-vulkan, llama-cpu and pdfium into {}. The model and \
+                     runtime folders are independent; choose both to keep everything in one place.",
+                    runtime_dir.display()
+                ));
             });
-        }
-        // PDFium is checked independently: a missing llama-server must not
-        // hide a missing PDFium (both break the first PDF job).
-        if !runtime.pdfium_ready() {
-            runtime_trouble = true;
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.heading("PDFium not found");
-                ui.label(
-                    "PDF rendering needs PDFium. Choose the runtime folder that contains \
-                     pdfium/bin, or set OCR_PDFIUM to the library file.",
-                );
-                ui.horizontal(|ui| {
-                    if ui.button("Choose runtime folder...").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.apply_runtime_dir(folder);
-                        }
-                    }
-                });
-            });
-        }
-        if !runtime_trouble {
+        } else {
             ui.horizontal(|ui| {
                 ui.colored_label(OK_COLOR, "Runtime ready");
                 ui.label(format!(
@@ -824,6 +1096,7 @@ impl OcrApp {
                     runtime.pdfium_source.label()
                 ));
             });
+            ui.weak(format!("Runtime folder: {}", runtime_dir.display()));
             if runtime.pdfium_source.is_env() {
                 ui.colored_label(
                     WARN_COLOR,
@@ -831,6 +1104,23 @@ impl OcrApp {
                      OCR_PDFIUM to use the bundled library.",
                 );
             }
+        }
+
+        // The transfer is visible in both states: a re-download of a ready
+        // runtime must still show progress and a Cancel button.
+        if self.runtime_downloading {
+            ui.add(
+                egui::ProgressBar::new(self.progress)
+                    .show_percentage()
+                    .animate(true),
+            );
+            ui.horizontal(|ui| {
+                ui.label(&self.runtime_text);
+                if ui.button("Cancel runtime download").clicked() {
+                    self.runtime_cancel.store(true, Ordering::SeqCst);
+                    self.status = "Cancelling runtime download...".to_string();
+                }
+            });
         }
 
         if model_ready && runtime.is_ready() {
@@ -1025,19 +1315,50 @@ impl OcrApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Runtime dir");
-                    let shown = if self.runtime_dir.trim().is_empty() {
-                        "(auto: runtime/ next to the exe)".to_string()
-                    } else {
-                        self.runtime_dir.clone()
-                    };
-                    ui.label(shown);
-                    if ui.button("Choose runtime…").clicked() {
+                    ui.label("Runtime folder");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.runtime_dir)
+                                .hint_text(default_runtime_dir().display().to_string())
+                                .desired_width(370.0),
+                        )
+                        .changed()
+                    {
+                        self.apply_runtime_dir_text();
+                    }
+                    if ui.button("…").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.apply_runtime_dir(folder);
                         }
                     }
+                    let busy = self.downloading || self.runtime_downloading || self.running;
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Re-download runtime"))
+                        .clicked()
+                    {
+                        self.confirm_runtime_replace = true;
+                    }
                 });
+                if self.confirm_runtime_replace {
+                    ui.colored_label(
+                        WARN_COLOR,
+                        "Re-download replaces the installed llama-vulkan / llama-cpu / pdfium \
+                         in the runtime folder with the pinned b12535 / 8165 builds.",
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new("Yes, re-download runtime").strong(),
+                            ))
+                            .clicked()
+                        {
+                            self.start_runtime_download(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_runtime_replace = false;
+                        }
+                    });
+                }
                 ui.label(format!(
                     "Model files: {}",
                     self.model_status.dir().display()
@@ -1058,8 +1379,9 @@ impl OcrApp {
                 ));
                 ui.label(
                     "The model and llama-server are not bundled. Download model stores the \
-                     weights in the app-data model folder (or Model dir). The release package \
-                     ships runtime/ next to the exe.",
+                     weights in the app-data model folder (or Model dir); Download runtime \
+                     installs the pinned llama-server and PDFium into the Runtime folder. \
+                     The release package also ships runtime/ next to the exe.",
                 );
             });
 
@@ -1071,7 +1393,10 @@ impl OcrApp {
     fn ui_actions(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let recognize = ui.add_enabled(
-                !self.running && !self.downloading && !self.inputs.is_empty(),
+                !self.running
+                    && !self.downloading
+                    && !self.runtime_downloading
+                    && !self.inputs.is_empty(),
                 egui::Button::new(egui::RichText::new("Recognize").strong())
                     .min_size(egui::vec2(150.0, 32.0)),
             );
@@ -1092,6 +1417,10 @@ impl OcrApp {
             if self.downloading {
                 ui.spinner();
                 ui.label("Downloading model...");
+            }
+            if self.runtime_downloading {
+                ui.spinner();
+                ui.label("Downloading runtime...");
             }
             if ui
                 .add_enabled(
@@ -1122,7 +1451,7 @@ impl OcrApp {
         ui.add(
             egui::ProgressBar::new(self.progress)
                 .show_percentage()
-                .animate(self.running || self.downloading),
+                .animate(self.running || self.downloading || self.runtime_downloading),
         );
         ui.label(&self.status);
     }
@@ -1208,7 +1537,7 @@ impl eframe::App for OcrApp {
             self.ui_log(ui);
         });
 
-        if self.running || self.downloading {
+        if self.running || self.downloading || self.runtime_downloading {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -1222,6 +1551,7 @@ impl Drop for OcrApp {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
         self.download_cancel.store(true, Ordering::SeqCst);
+        self.runtime_cancel.store(true, Ordering::SeqCst);
         if let Some(rx) = self.rx.take() {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -1230,7 +1560,7 @@ impl Drop for OcrApp {
                     break;
                 }
                 match rx.recv_timeout(left) {
-                    Ok(Msg::Done(_)) | Ok(Msg::DownloadDone(_)) => break,
+                    Ok(Msg::Done(_)) | Ok(Msg::DownloadDone(_)) | Ok(Msg::RuntimeDone(_)) => break,
                     Ok(_) => {}
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
@@ -1309,7 +1639,11 @@ mod tests {
         match rx.try_recv() {
             Ok(Msg::Done(Err(message))) => assert!(message.contains("panicked"), "{message}"),
             Ok(Msg::Done(Ok(_))) => panic!("unexpected success"),
-            Ok(Msg::Event(_)) | Ok(Msg::Download(_)) | Ok(Msg::DownloadDone(_)) => {
+            Ok(Msg::Event(_))
+            | Ok(Msg::Download(_))
+            | Ok(Msg::DownloadDone(_))
+            | Ok(Msg::Runtime(_))
+            | Ok(Msg::RuntimeDone(_)) => {
                 panic!("unexpected message")
             }
             Err(error) => panic!("no Done message: {error}"),
@@ -1363,6 +1697,57 @@ mod tests {
         assert_eq!(
             friendly_failure("something unexpected\nsecond line"),
             "Failed. See the log for details."
+        );
+    }
+
+    #[test]
+    fn runtime_guard_reports_a_panicking_worker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = RuntimeGuard::new(tx.clone());
+            panic!("boom");
+        }));
+        assert!(result.is_err());
+        match rx.try_recv() {
+            Ok(Msg::RuntimeDone(Err(message))) => {
+                assert!(message.contains("panicked"), "{message}")
+            }
+            _ => panic!("no RuntimeDone message"),
+        }
+    }
+
+    #[test]
+    fn runtime_folder_text_editing_fills_paths_and_download_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime-folder");
+        let pdfium = runtime_pdfium_candidate(&runtime);
+        std::fs::create_dir_all(pdfium.parent().unwrap()).unwrap();
+        std::fs::write(&pdfium, b"fake").unwrap();
+        let server = ocr_app::runtime::server_exe_name();
+        for sub in ["llama-vulkan", "llama-cpu"] {
+            let dir = runtime.join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(server), b"fake").unwrap();
+        }
+
+        let mut app = OcrApp::new();
+        app.runtime_dir = runtime.display().to_string();
+        app.apply_runtime_dir_text();
+        assert!(
+            app.runtime.is_ready(),
+            "typed runtime folder must drive discovery: {:?}",
+            app.runtime
+        );
+        assert_eq!(app.target_runtime_dir(), runtime);
+        assert_eq!(app.llama_dir, runtime.display().to_string());
+        assert_eq!(app.pdfium, pdfium.display().to_string());
+
+        app.runtime_dir.clear();
+        app.apply_runtime_dir_text();
+        assert_eq!(
+            app.target_runtime_dir(),
+            ocr_core::default_runtime_dir(),
+            "an empty field downloads into the platform app-data runtime folder"
         );
     }
 

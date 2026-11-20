@@ -4,6 +4,7 @@
 pub mod doctor;
 pub mod download;
 pub mod job;
+pub mod runtime;
 pub mod setup;
 
 pub use doctor::{doctor, print_doctor, Check, DoctorReport};
@@ -11,6 +12,10 @@ pub use download::{
     download_models, download_models_cancellable, human_bytes, DownloadProgress, MODEL_FILES,
 };
 pub use job::{preflight, run_job, JobOptions, JobReport, PreparedJob};
+pub use runtime::{
+    download_runtime, runtime_assets, runtime_assets_for, runtime_download_mb, verify_runtime,
+    RuntimeAsset, RuntimeComponent, RuntimeInstall, RuntimeProgress,
+};
 pub use setup::{
     check_model_status, model_status, pdfium_for_runtime, runtime_pdfium_candidate, runtime_status,
     ModelStatus, PdfiumSource, RuntimeStatus,

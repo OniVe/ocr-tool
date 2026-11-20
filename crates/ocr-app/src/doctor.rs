@@ -90,7 +90,14 @@ pub fn doctor(model_dir_arg: Option<&Path>, llama_dir: Option<&Path>) -> DoctorR
         }
     }
 
-    let pdfium = match ocr_pdf::locate_pdfium() {
+    // `--llama-dir` may point at a runtime root that also carries
+    // `pdfium/bin|lib` (the GUI runtime folder / downloaded runtime layout).
+    // Prefer that library, then fall back to the ambient search.
+    let pdfium_result = llama_dir
+        .and_then(|dir| ocr_pdf::locate_pdfium_at(dir).ok())
+        .map(Ok)
+        .unwrap_or_else(ocr_pdf::locate_pdfium);
+    let pdfium = match pdfium_result {
         Ok(path) => {
             let mut check = file_check("pdfium", &path);
             check.version = file_version(&path);
@@ -431,6 +438,39 @@ mod tests {
             Some("version: 1.0.0-dev (build 12535, commit abc)")
         );
         assert!(extract_version_line("no banner here").is_none());
+    }
+
+    #[test]
+    fn doctor_finds_pdfium_in_the_runtime_root_passed_as_llama_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime");
+        let llama = runtime.join("llama-cpu");
+        std::fs::create_dir_all(&llama).unwrap();
+        std::fs::write(
+            llama.join(if cfg!(windows) {
+                "llama-server.exe"
+            } else {
+                "llama-server"
+            }),
+            b"fake",
+        )
+        .unwrap();
+        let pdfium_dir = runtime.join("pdfium").join("bin");
+        std::fs::create_dir_all(&pdfium_dir).unwrap();
+        let pdfium = pdfium_dir.join(ocr_pdf::pdfium_library_names()[0]);
+        std::fs::write(&pdfium, b"fake").unwrap();
+
+        let report = doctor(Some(&tmp.path().join("no-model")), Some(&runtime));
+        assert!(
+            report.pdfium.ok,
+            "the runtime root passed as --llama-dir must provide PDFium: {}",
+            report.pdfium.detail
+        );
+        assert_eq!(Path::new(&report.pdfium.path), pdfium.as_path());
+        assert!(report
+            .llama_candidates
+            .iter()
+            .any(|candidate| candidate.device == "cpu"));
     }
 
     #[test]

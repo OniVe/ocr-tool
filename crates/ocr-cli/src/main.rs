@@ -5,8 +5,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use ocr_app::download::{human_bytes, verify_models, DownloadProgress, MODEL_FILES};
+use ocr_app::runtime::{download_runtime, runtime_assets, verify_runtime, RuntimeProgress};
 use ocr_app::{doctor, download_models, preflight, print_doctor, run_job, JobOptions};
-use ocr_core::{resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent, MODEL_ENV};
+use ocr_core::{
+    default_runtime_dir, resolve_model_dir, Device, LogLevel, OutputFormat, ProgressEvent,
+    MODEL_ENV, RUNTIME_TAG,
+};
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +33,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Model management
     Models(ModelsArgs),
+    /// Runtime (llama-server + PDFium) management
+    Runtime(RuntimeArgs),
     /// Launch the desktop GUI
     Gui,
 }
@@ -147,6 +153,38 @@ struct VerifyArgs {
     deep: bool,
 }
 
+#[derive(Args)]
+struct RuntimeArgs {
+    #[command(subcommand)]
+    command: RuntimeCommand,
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommand {
+    /// Download llama-server (and CPU fallback) plus PDFium
+    Download(RuntimeDownloadArgs),
+    /// Check an installed runtime folder without using the network
+    Verify(RuntimeVerifyArgs),
+}
+
+#[derive(Args)]
+struct RuntimeDownloadArgs {
+    /// Destination runtime folder (defaults to the app-data runtime folder)
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Replace installed components and partial downloads
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args)]
+struct RuntimeVerifyArgs {
+    /// Runtime folder (defaults to the app-data runtime folder)
+    #[arg(long)]
+    dir: Option<PathBuf>,
+}
+
 fn parse_device(value: &str) -> Result<Device, String> {
     value.parse()
 }
@@ -172,6 +210,7 @@ fn execute(cli: Cli) -> Result<i32> {
         Command::Ocr(args) => run_ocr(args),
         Command::Doctor(args) => run_doctor(args),
         Command::Models(args) => run_models(args),
+        Command::Runtime(args) => run_runtime(args),
         Command::Gui => run_gui(),
     }
 }
@@ -307,6 +346,72 @@ fn run_models(args: ModelsArgs) -> Result<i32> {
                 }
                 Err(error) => {
                     eprintln!("ocr-tool: model verification failed: {error:#}");
+                    Ok(2)
+                }
+            }
+        }
+    }
+}
+
+fn run_runtime(args: RuntimeArgs) -> Result<i32> {
+    match args.command {
+        RuntimeCommand::Download(download) => {
+            let dir = download.dir.clone().unwrap_or_else(default_runtime_dir);
+            let assets = match runtime_assets() {
+                Ok(assets) => assets,
+                Err(error) => {
+                    eprintln!("ocr-tool: runtime download failed: {error:#}");
+                    return Ok(3);
+                }
+            };
+            let total: u64 = assets.iter().map(|asset| asset.size).sum();
+            println!(
+                "Downloading {} runtime component(s) (~{}) for {} to {}",
+                assets.len(),
+                human_bytes(total),
+                RUNTIME_TAG,
+                dir.display()
+            );
+            let cancel = AtomicBool::new(false);
+            let mut printer = RuntimePrinter::default();
+            match download_runtime(&dir, download.force, &cancel, &mut |progress| {
+                printer.handle(progress)
+            }) {
+                Ok(install) => {
+                    printer.finish_line();
+                    println!("Runtime ready:");
+                    println!("  gpu:    {}", install.llama_gpu.display());
+                    println!("  cpu:    {}", install.llama_cpu.display());
+                    println!("  pdfium: {}", install.pdfium.display());
+                    println!(
+                        "Downloaded: {} ({} new)",
+                        human_bytes(total),
+                        human_bytes(install.downloaded_bytes)
+                    );
+                    Ok(0)
+                }
+                Err(error) => {
+                    printer.finish_line();
+                    eprintln!("ocr-tool: runtime download failed: {error:#}");
+                    Ok(3)
+                }
+            }
+        }
+        RuntimeCommand::Verify(verify) => {
+            let dir = verify.dir.unwrap_or_else(default_runtime_dir);
+            match verify_runtime(&dir) {
+                Ok(install) => {
+                    println!(
+                        "Runtime OK: {} (gpu {}, cpu {}, pdfium {})",
+                        dir.display(),
+                        install.llama_gpu.display(),
+                        install.llama_cpu.display(),
+                        install.pdfium.display()
+                    );
+                    Ok(0)
+                }
+                Err(error) => {
+                    eprintln!("ocr-tool: runtime verification failed: {error:#}");
                     Ok(2)
                 }
             }
@@ -478,6 +583,53 @@ impl DownloadPrinter {
             progress.file_index,
             progress.file,
             human_bytes(progress.downloaded)
+        );
+        self.line_open = true;
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+    }
+
+    fn finish_line(&mut self) {
+        if self.line_open {
+            eprintln!();
+            self.line_open = false;
+        }
+    }
+}
+
+#[derive(Default)]
+struct RuntimePrinter {
+    last_percent: Option<u64>,
+    line_open: bool,
+}
+
+impl RuntimePrinter {
+    fn handle(&mut self, progress: RuntimeProgress) {
+        let percent = (progress.downloaded.saturating_mul(100) / progress.total.max(1)).min(100);
+        if progress.done {
+            self.finish_line();
+            eprintln!(
+                "  {}: {} ({})",
+                progress.component.as_str(),
+                if progress.skipped {
+                    "already present"
+                } else {
+                    "installed"
+                },
+                human_bytes(progress.total)
+            );
+            self.last_percent = None;
+            return;
+        }
+        if self.last_percent == Some(percent) {
+            return;
+        }
+        self.last_percent = Some(percent);
+        eprint!(
+            "\r  {}: {percent:3}%  {} / {}",
+            progress.component.as_str(),
+            human_bytes(progress.downloaded),
+            human_bytes(progress.total)
         );
         self.line_open = true;
         use std::io::Write;

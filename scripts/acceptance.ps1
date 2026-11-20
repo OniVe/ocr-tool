@@ -130,7 +130,21 @@ Write-Host "`n== first-run configuration without model/pdfium =="
 $TempRoot = Join-Path $env:TEMP ("ocr-tool-acceptance-" + $PID)
 $emptyModel = Join-Path $TempRoot "empty-models"
 $emptyOut = Join-Path $TempRoot "empty-out"
-New-Item -ItemType Directory -Force -Path $emptyModel, $emptyOut | Out-Null
+$emptyRuntime = Join-Path $TempRoot "empty-runtime"
+New-Item -ItemType Directory -Force -Path $emptyModel, $emptyOut, $emptyRuntime | Out-Null
+
+# Runtime download/verify CLI surface (offline checks only; the real ~69 MB E2E
+# lives in scripts/acceptance-runtime.ps1).
+Write-Host "`n== runtime CLI (offline) =="
+$runtimeHelp = & $Exe runtime --help 2>&1 | Out-String
+Check "runtime --help lists download and verify" `
+    ($runtimeHelp -match "download" -and $runtimeHelp -match "verify")
+$runtimeDownloadHelp = & $Exe runtime download --help 2>&1 | Out-String
+Check "runtime download --help lists --dir and --force" `
+    ($runtimeDownloadHelp -match "--dir" -and $runtimeDownloadHelp -match "--force")
+& $Exe runtime verify --dir $emptyRuntime *> (Join-Path $TempRoot "runtime-verify-empty.log")
+$code = $LASTEXITCODE
+Check "runtime verify on an empty folder exits 2" ($code -eq 2) "exit $code"
 
 $noModelLog = Join-Path $TempRoot "no-model.log"
 $code = Invoke-Ocr @("ocr", $Jpg, "-o", $emptyOut, "--model-dir", $emptyModel) $noModelLog
@@ -178,6 +192,9 @@ try {
 Check "dist layout finds bundled llama and pdfium" (
     $distDoctor -match "llama-server candidates" -and $distDoctor -match "\[OK\s+\] pdfium"
 ) $distDoctor
+& $Exe runtime verify --dir $distRuntime *> (Join-Path $OutRoot "runtime-verify-dist.log")
+$code = $LASTEXITCODE
+Check "runtime verify accepts the packaged layout" ($code -eq 0) "exit $code"
 
 # ---------------------------------------------------------------- GPU JPG
 Write-Host "`n== GPU: invoice_scan_ru.jpg =="
@@ -315,6 +332,35 @@ if (-not $SkipGui) {
         }
         Check "GUI first run with empty model dir stayed alive for 5 s" $firstRunAlive `
             $(if ($firstRunAlive) { "" } else { "exit code $($firstRun.ExitCode)" })
+
+        # Runtime-ready path: the real dist runtime from the layout section is
+        # pointed at through the documented environment variables.
+        $savedLlamaEnv = $env:OCR_LLAMA_SERVER
+        $savedPdfiumEnv = $env:OCR_PDFIUM
+        $env:OCR_LLAMA_SERVER = Join-Path $distRuntime "llama-cpu/llama-server.exe"
+        $env:OCR_PDFIUM = Join-Path $distRuntime "pdfium/bin/pdfium.dll"
+        try {
+            $readyGui = Start-Process -FilePath $Gui -PassThru
+            Start-Sleep -Seconds 5
+            $readyAlive = -not $readyGui.HasExited
+            if ($readyAlive) {
+                Stop-Process -Id $readyGui.Id -Force
+                $readyGui.WaitForExit()
+            }
+        } finally {
+            if ($null -ne $savedLlamaEnv) {
+                $env:OCR_LLAMA_SERVER = $savedLlamaEnv
+            } else {
+                Remove-Item Env:\OCR_LLAMA_SERVER -ErrorAction SilentlyContinue
+            }
+            if ($null -ne $savedPdfiumEnv) {
+                $env:OCR_PDFIUM = $savedPdfiumEnv
+            } else {
+                Remove-Item Env:\OCR_PDFIUM -ErrorAction SilentlyContinue
+            }
+        }
+        Check "GUI with a ready runtime stayed alive for 5 s" $readyAlive `
+            $(if ($readyAlive) { "" } else { "exit code $($readyGui.ExitCode)" })
     }
 }
 

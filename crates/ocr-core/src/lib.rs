@@ -12,9 +12,10 @@ pub mod progress;
 pub mod prompt;
 
 pub use config::{
-    app_data_dir, default_model_dir, discover_model_paths, model_dir_source, platform_tag,
-    resolve_model_dir, runtime_dir_names, Device, ModelPaths, OutputFormat, DEFAULT_MMPROJ_FILE,
-    DEFAULT_MODEL_FILE, DEFAULT_MODEL_SUBDIR, LLAMA_ENV, MODEL_ENV, PDFIUM_ENV,
+    app_data_dir, default_model_dir, default_runtime_dir, discover_model_paths, model_dir_source,
+    platform_tag, resolve_model_dir, runtime_dir_names, Device, ModelPaths, OutputFormat,
+    DEFAULT_MMPROJ_FILE, DEFAULT_MODEL_FILE, DEFAULT_MODEL_SUBDIR, LLAMA_ENV, MODEL_ENV,
+    PDFIUM_ENV, RUNTIME_TAG,
 };
 pub use html::{
     clean_model_html, page_to_markdown, render_html_document, render_markdown_document,

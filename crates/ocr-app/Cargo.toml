@@ -14,6 +14,9 @@ ureq.workspace = true
 sha2.workspace = true
 hex.workspace = true
 walkdir.workspace = true
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
 ocr-core = { path = "../ocr-core" }
 ocr-pdf = { path = "../ocr-pdf" }
 ocr-engine = { path = "../ocr-engine" }

@@ -30,34 +30,51 @@ snapshot (see Limitations).
 
 ## Quick start (Windows)
 
+Build (or unpack the release package) and start the GUI; no CLI is needed:
+
 ```powershell
-# 1. Runtime: llama-server (Vulkan + CPU fallback) and PDFium -> runtime/windows-x64/
-.\scripts\fetch-runtime.ps1
+cargo build --release
+.\target\release\ocr-tool-gui.exe
+```
 
-# 2. Model (~3.4 GB, resumable, SHA-256 verified) -> %LOCALAPPDATA%\ocr-tool\models\chandra-ocr-2\
+On the first run the GUI shows two independent setup panels:
+
+1. **Download model (~3.4 GB)** — the pinned Chandra Q4_K_M + mmproj pair,
+   resumable and SHA-256 verified, into the app-data model folder (or the
+   editable Model dir).
+2. **Download runtime (~70 MB)** — llama-vulkan, llama-cpu and PDFium into the
+   editable **Runtime folder** (defaults to
+   `%LOCALAPPDATA%\ocr-tool\runtime\windows-x64`). The sizes are per platform
+   (~25 MB on macOS).
+
+Both downloads have progress and cancel; Recognize stays disabled while either
+is running. To keep everything in one place, set both the Model dir and the
+Runtime folder.
+
+CLI parity (for robots/scripts):
+
+```powershell
+cargo run --release -p ocr-cli -- runtime download
 cargo run --release -p ocr-cli -- models download
-
-# 3. Check what was found
 cargo run --release -p ocr-cli -- doctor
-
-# 4. Recognize one file or a folder
 cargo run --release -p ocr-cli -- ocr samples\invoice_scan_ru.jpg -o out
 cargo run --release -p ocr-cli -- ocr samples\contract_ru.pdf -o out --pages 1-2
 ```
 
-CLI is optional: `target\release\ocr-tool-gui.exe` performs its own setup check
-on start. If the model is missing it offers **Download model (~3.4 GB)** with
-progress and cancel, **Choose existing model folder…**, and **Open model
-folder**; if the runtime is missing it offers **Choose runtime folder…**. The
-model download is resumable and recognises an already present pair (including
-`chandra-q4.gguf` + `mmproj.gguf`), so it is not fetched twice. When the files
-exist but have the wrong size, **Replace / Re-download…** (with a confirmation
-step) deletes them and fetches the pinned pair again.
+The GUI is self-sufficient: if the model is missing it offers **Download model
+(~3.4 GB)** with progress and cancel, **Choose existing model folder…**, and
+**Open model folder**; if the runtime is missing it offers the Runtime folder
+field plus **Download runtime (~70 MB)**. Both downloads are resumable and
+recognise an already present installation, so nothing is fetched twice. When
+model files exist but have the wrong size, **Replace / Re-download…** (with a
+confirmation step) deletes them and fetches the pinned pair again; a ready
+runtime gets **Re-download runtime** under Advanced paths.
 
 Linux/macOS:
 
 ```bash
-./scripts/fetch-runtime.sh
+cargo build --release
+cargo run --release -p ocr-cli -- runtime download
 cargo run --release -p ocr-cli -- models download
 cargo run --release -p ocr-cli -- doctor
 cargo run --release -p ocr-cli -- ocr document.pdf -o out
@@ -72,9 +89,12 @@ $env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
 ```
 
 or use `--llama-dir`, `--model-dir`, `--pdfium` on the CLI / the Model dir,
-llama dir and PDFium fields under “Advanced paths” in the GUI. A single
-**Runtime dir** picker fills the llama directory and the PDFium library from
-`runtime/<os>-<arch>/{llama-*,pdfium}`.
+llama dir and PDFium fields under “Advanced paths” in the GUI. The **Runtime
+folder** field in the Runtime panel (and the picker under Advanced) fills the
+llama directory and the PDFium library from
+`runtime/<os>-<arch>/{llama-*,pdfium}`; the same folder is where **Download
+runtime** installs the pinned archives. Model and runtime folders are
+independent on purpose — set both to keep everything in one place.
 
 ## CLI
 
@@ -92,6 +112,8 @@ ocr-tool ocr <inputs...> -o <dir>
 ocr-tool doctor [--model-dir PATH] [--llama-dir PATH] [--json]
 ocr-tool models download [--dir PATH] [--force]
 ocr-tool models verify [--dir PATH] [--deep]
+ocr-tool runtime download [--dir PATH] [--force]
+ocr-tool runtime verify [--dir PATH]
 ocr-tool gui
 ```
 
@@ -114,6 +136,14 @@ ocr-tool gui
   `--deep` additionally computes SHA-256 (reads ~3.4 GB). `models download`
   recognises the same renamed pairs as OCR (`chandra-q4.gguf` + `mmproj.gguf`)
   and reuses them instead of downloading again.
+- `runtime download` installs the pinned llama.cpp b12535 builds (Vulkan/Metal
+  GPU + CPU fallback) and PDFium 8165 into `--dir` (default:
+  `%LOCALAPPDATA%\ocr-tool\runtime\<tag>`). Archives are size/SHA-256 verified
+  before extraction, `.part` files resume, cancel keeps them, and a component is
+  unpacked into a temporary directory and renamed into place. `runtime verify`
+  checks an installed folder offline; it exits `2` when a component is missing.
+  A failed `runtime download` exits `3`. Both accept `--dir PATH`; the model and
+  runtime commands are independent.
 
 Output files are named `<source-stem>.md`, `<source-stem>.html` (or only the
 requested format), with `-2`, `-3` suffixes on collision. Windows device names
@@ -149,19 +179,28 @@ required.
   files and their `.part` remainders, and downloads the pinned pair again; it is
   the GUI exit from the “incomplete / wrong size” state that a plain download
   deliberately refuses to overwrite.
-- **Runtime missing** — a “Runtime not found” panel (llama-server) and a
-  separate “PDFium not found” panel each offer **Choose runtime folder…**; both
-  problems are shown when both components are absent. The chosen folder fills
-  llama dir (`llama-vulkan` / `llama-cpu`) and PDFium (`pdfium/bin/<lib>`); in
-  the release package the `runtime` folder sits next to the executable, so it is
-  found automatically. A missing runtime never appears as a raw `os error 3` in
-  the main status.
+- **Runtime missing** — a “Runtime not found” panel shows the editable **Runtime
+  folder** (placeholder: the platform default), **Choose folder…**, **Open
+  folder**, and **Download runtime (~70 MB; ~25 MB on macOS)**. The download
+  fetches llama-vulkan, llama-cpu and PDFium for the current platform, verifies
+  their pinned SHA-256, and installs them into the chosen folder; progress,
+  per-component status and cancel are shown, and a partial `.part` archive
+  resumes. On success the folder fills llama dir (`llama-vulkan` / `llama-cpu`)
+  and PDFium (`pdfium/bin|lib/<lib>`) and the status says
+  “Runtime ready … (downloaded to <path>)”. In the release package the
+  `runtime` folder next to the executable is still discovered automatically. A
+  missing runtime never appears as a raw `os error 3` in the main status.
+- **Independent downloads** — model and runtime each have their own button and
+  cancel; while either runs, Recognize and the other download button are
+  disabled. **Re-download runtime** (with confirmation) lives under Advanced
+  paths once the runtime is ready.
 - **PDFium source** — “Runtime ready” names where the library came from: the
   chosen runtime folder/path, `OCR_PDFIUM`, or auto-discovery next to the app.
   A visible warning is shown when `OCR_PDFIUM` overrides the bundled runtime.
 - **Advanced paths** opens automatically while setup is incomplete (model,
   llama-server or PDFium missing) and keeps optional Model dir / llama dir /
-  PDFium / Runtime dir overrides.
+  PDFium / Runtime folder overrides. The Runtime folder is the same field as in
+  the Runtime panel.
 - Recognition: add files/folder (drag and drop works), output directory,
   format, device, DPI, page range, PDF password (masked field), recurse toggle;
   **Recognize** runs in a background thread with progress, per-page status,
@@ -253,15 +292,19 @@ Packaging (model not included):
 ```
 
 `scripts/fetch-runtime.ps1|.sh` download the pinned llama.cpp and PDFium archives
-into `runtime/<target>/`. `scripts/package.ps1|.sh` copy the executables,
-`runtime/<target>`, README and NOTICE into `dist/`. The GitHub Actions workflow
-builds and uploads artifacts for Windows, Ubuntu and macOS; it does not publish a
-release. Code signing/notarization is not configured.
+into `runtime/<target>/` for packaging; GUI and CLI users do not need them
+(`Download runtime` / `runtime download` install the same layout).
+`scripts/package.ps1|.sh` copy the executables, `runtime/<target>`, README and
+NOTICE into `dist/`. The GitHub Actions workflow builds and uploads artifacts for
+Windows, Ubuntu and macOS; it does not publish a release. Code
+signing/notarization is not configured.
 
 `scripts/acceptance.ps1` is the local acceptance test used during development.
 It expects `.tmp/models`, `.tmp/llama`, `.tmp/llama-cpu` and `.tmp/pdfium` and
 the sample files; it checks the recognized substrings, PDF pages, CPU fallback,
-`doctor`, and GUI startup.
+`doctor`, GUI startup, and the offline `runtime --help` / `runtime verify`
+commands. `scripts/acceptance-runtime.ps1` performs the real ~69 MB runtime
+download E2E (archive SHA-256, `llama-server --version`, `doctor`, CPU OCR).
 
 ## Performance
 
@@ -299,10 +342,9 @@ typical laptops.
 - No batch parallelization: pages are processed sequentially through one server.
 - Linux/macOS were not exercised on hardware in this snapshot; only Windows was
   verified locally. CI files are provided but were not run.
-- The GUI downloads the model itself; the external runtime (llama-server +
-  PDFium) is still installed by `scripts/fetch-runtime` or comes with the
-  release package (`runtime/` next to the executable) and can be chosen from
-  the GUI runtime-folder picker.
+- The GUI and CLI download both the model and the runtime (llama-server +
+  PDFium) themselves; the release package also ships `runtime/` next to the
+  executable. Nothing is installed by a hidden script.
 - The model is licensed OpenRAIL-M; commercial use is not promised. See NOTICE.
 - `samples/` contains personal data and is gitignored except `SOURCES.md`.
 
@@ -310,8 +352,10 @@ typical laptops.
 
 All recognition is local. The only network operations are explicit model
 downloads (the GUI **Download model** button or `models download`, both to
-Hugging Face) and `fetch-runtime` requests to GitHub. No telemetry. Output files can contain sensitive text; protect them
-accordingly.
+Hugging Face) and explicit runtime downloads (the GUI **Download runtime**
+button or `runtime download`, both to GitHub), plus the packaging
+`fetch-runtime` scripts. No telemetry. Output files can contain sensitive text;
+protect them accordingly.
 
 ## License
 
