@@ -9,6 +9,9 @@ description = "ocr-tool command line interface"
 name = "ocr-tool"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

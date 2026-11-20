@@ -40,11 +40,17 @@ fn main() -> eframe::Result<()> {
         log_path.display()
     ));
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1000.0, 940.0])
+        .with_min_inner_size([900.0, 700.0])
+        .with_title("ocr-tool — Распознавание документов");
+    // The window/taskbar icon is separate from the icon embedded into the exe.
+    match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(error) => gui_log::write(format!("warning: cannot load the window icon: {error}")),
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 940.0])
-            .with_min_inner_size([900.0, 700.0])
-            .with_title("ocr-tool — Распознавание документов"),
+        viewport,
         ..Default::default()
     };
     let result = eframe::run_native(

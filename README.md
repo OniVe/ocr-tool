@@ -62,6 +62,13 @@ remains a console program. Model/runtime downloads run on background threads,
 and `llama-server` is a separate, console-hidden sidecar managed by the GUI
 (in-process inference is out of scope).
 
+Both Windows executables carry the same app icon (`assets/ocr-tool.ico`), so
+Explorer, the taskbar and Alt-Tab show it; the GUI window icon is loaded from
+`assets/icon-256.png`. The editable vector source is `assets/ocr-tool.svg`
+(1024×1024, accent-blue tile, document and turquoise scan line). The PNG is
+also used for window icons on Linux/macOS; a macOS `.icns` can be generated in
+CI from the same source.
+
 CLI parity (for robots/scripts):
 
 ```powershell

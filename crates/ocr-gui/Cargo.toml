@@ -9,6 +9,9 @@ description = "Desktop GUI for ocr-tool"
 name = "ocr-tool-gui"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
 [dependencies]
 anyhow.workspace = true
 eframe = "0.31"
