@@ -69,6 +69,10 @@ pub fn clean_model_html(raw: &str) -> String {
 /// Sanitize one model-produced HTML fragment. Layout attributes required by the
 /// official prompt (`data-bbox`, `data-label`) are preserved.
 pub fn sanitize_fragment(fragment: &str) -> String {
+    // Normalize before the common HTML/Markdown branch: the model sometimes
+    // numbers list items itself (`<li>1. …</li>`), while `<ol>` adds its own
+    // number and htmd adds a Markdown one.
+    let fragment = normalize_list_markers(fragment);
     let mut builder = Builder::default();
     builder
         .add_tags(&[
@@ -108,7 +112,198 @@ pub fn sanitize_fragment(fragment: &str) -> String {
         .add_generic_attribute_prefixes(&["data-"])
         .link_rel(Some("noopener noreferrer"))
         .rm_tags(&["script", "style", "iframe", "object", "embed", "form"]);
-    builder.clean(fragment).to_string()
+    builder.clean(&fragment).to_string()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListKind {
+    Ordered,
+    Unordered,
+}
+
+/// Strip duplicated list markers the model puts inside `<li>`.
+///
+/// Chandra often returns `<ol><li>1. Утвердить…</li></ol>`: the `<ol>` already
+/// renders "1.", so the literal marker produces "1. 1. …" in HTML and
+/// `1.  1\. …` in Markdown. Only a marker at the very start of the `<li>`
+/// content is removed (after leading whitespace/inline tags); a number in the
+/// middle of the text, a subsection (`1.1`) or a date (`2024.`) is untouched.
+/// For `<ul>`, an explicit leading `•`/`-` bullet is removed for the same
+/// reason.
+pub fn normalize_list_markers(fragment: &str) -> String {
+    if !fragment.contains("<li") {
+        return fragment.to_string();
+    }
+
+    let mut out = String::with_capacity(fragment.len());
+    let mut lists: Vec<ListKind> = Vec::new();
+    let mut in_li = false;
+    let mut pending = false;
+    let mut li_kind: Option<ListKind> = None;
+    let mut index = 0;
+
+    while index < fragment.len() {
+        if fragment.as_bytes()[index] == b'<' {
+            let Some(end) = find_tag_end(fragment, index) else {
+                out.push_str(&fragment[index..]);
+                break;
+            };
+            let tag = &fragment[index..end];
+            let lower = tag.to_ascii_lowercase();
+            let closing = lower.starts_with("</");
+            let name = tag_name(&lower);
+            let self_closing = lower.trim_end().ends_with("/>");
+            match (name, closing, self_closing) {
+                ("ol", false, false) => {
+                    lists.push(ListKind::Ordered);
+                    if in_li {
+                        pending = false;
+                    }
+                }
+                ("ul", false, false) => {
+                    lists.push(ListKind::Unordered);
+                    if in_li {
+                        pending = false;
+                    }
+                }
+                ("ol", true, _) | ("ul", true, _) => {
+                    lists.pop();
+                }
+                ("li", false, false) => {
+                    in_li = true;
+                    pending = true;
+                    li_kind = lists.last().copied();
+                }
+                ("li", true, _) => {
+                    in_li = false;
+                    pending = false;
+                    li_kind = None;
+                }
+                _ => {}
+            }
+            out.push_str(tag);
+            index = end;
+            continue;
+        }
+
+        let next = fragment[index..]
+            .find('<')
+            .map(|offset| index + offset)
+            .unwrap_or(fragment.len());
+        let text = &fragment[index..next];
+        if in_li && pending {
+            match li_kind.and_then(|kind| strip_leading_marker(text, kind)) {
+                Some(stripped) => {
+                    out.push_str(&stripped);
+                    pending = false;
+                }
+                None => {
+                    out.push_str(text);
+                    if text.chars().any(|ch| !ch.is_whitespace()) {
+                        pending = false;
+                    }
+                }
+            }
+        } else {
+            out.push_str(text);
+        }
+        index = next;
+    }
+    out
+}
+
+/// End offset (exclusive) of the tag that starts at `start`, respecting quoted
+/// attributes, or `None` for an unterminated tag.
+fn find_tag_end(fragment: &str, start: usize) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut index = start + 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(active) => {
+                if byte == active {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'>' => return Some(index + 1),
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Lowercase tag name without `<`, `</` or attributes.
+fn tag_name(lower_tag: &str) -> &str {
+    let mut rest = if let Some(rest) = lower_tag.strip_prefix("</") {
+        rest
+    } else if let Some(rest) = lower_tag.strip_prefix('<') {
+        rest
+    } else {
+        return "";
+    };
+    rest = rest.trim_start();
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Remove exactly one leading marker from a text run, keeping leading
+/// whitespace. Returns `None` when the run does not start with a marker that
+/// has whitespace after it (so `1.1`, `-5` and dates stay intact).
+fn strip_leading_marker(text: &str, kind: ListKind) -> Option<String> {
+    let start = text.char_indices().find(|(_, ch)| !ch.is_whitespace())?.0;
+    let rest = &text[start..];
+    let marker_end = match kind {
+        ListKind::Ordered => {
+            let digits_end = rest
+                .find(|ch: char| !ch.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if digits_end == 0 {
+                return None;
+            }
+            let punctuation = rest[digits_end..].chars().next()?;
+            if punctuation != '.' && punctuation != ')' {
+                return None;
+            }
+            if punctuation == '.' && digits_end == 4 {
+                // `2024. Отчёт` at the start of an item is a date, not a
+                // duplicate list number.
+                if let Ok(year) = rest[..digits_end].parse::<u32>() {
+                    if (1900..=2099).contains(&year) {
+                        return None;
+                    }
+                }
+            }
+            digits_end + punctuation.len_utf8()
+        }
+        ListKind::Unordered => {
+            let marker = rest.chars().next()?;
+            if marker != '•' && marker != '-' {
+                return None;
+            }
+            marker.len_utf8()
+        }
+    };
+
+    let after = &rest[marker_end..];
+    let whitespace_end = after
+        .find(|ch: char| !ch.is_whitespace())
+        .unwrap_or(after.len());
+    if whitespace_end == 0 {
+        // `1.Foo`/`-5`: not a duplicated list marker.
+        return None;
+    }
+
+    let mut stripped = String::with_capacity(text.len());
+    stripped.push_str(&text[..start]);
+    stripped.push_str(&after[whitespace_end..]);
+    Some(stripped)
 }
 
 /// Render the final standalone HTML document: UTF-8, `lang="ru"`, print-friendly
@@ -308,6 +503,61 @@ mod tests {
         assert!(!clean.contains("iframe"), "{clean}");
         assert!(!clean.contains("onclick"), "{clean}");
         assert!(!clean.contains("<style"), "{clean}");
+    }
+
+    #[test]
+    fn ordered_list_markers_are_not_duplicated_in_html_or_markdown() {
+        let html = r#"<ol><li>1. Foo</li><li>2) Bar</li></ol>"#;
+        let clean = sanitize_fragment(html);
+        assert!(clean.contains("<li>Foo</li>"), "{clean}");
+        assert!(clean.contains("<li>Bar</li>"), "{clean}");
+        assert!(!clean.contains("1. Foo"), "{clean}");
+        assert!(!clean.contains("2) Bar"), "{clean}");
+
+        let document = render_html_document("t", &[(Some(1), html.to_string())]);
+        assert!(document.contains("<li>Foo</li>"), "{document}");
+        assert!(document.contains("<li>Bar</li>"), "{document}");
+
+        let markdown = page_to_markdown(html);
+        let compact = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(compact.contains("1. Foo"), "{markdown}");
+        assert!(compact.contains("2. Bar"), "{markdown}");
+        assert!(!compact.contains("1. 1."), "{markdown}");
+        assert!(!markdown.contains("1\\."), "{markdown}");
+    }
+
+    #[test]
+    fn list_marker_inside_paragraph_or_inline_tag_is_stripped() {
+        let html = r#"<ol><li><p>1. Первый</p></li><li><span>2. Второй</span></li></ol>"#;
+        let clean = sanitize_fragment(html);
+        assert!(clean.contains("<p>Первый</p>"), "{clean}");
+        assert!(clean.contains("<span>Второй</span>"), "{clean}");
+        assert!(!clean.contains("1. Первый"), "{clean}");
+        assert!(!clean.contains("2. Второй"), "{clean}");
+    }
+
+    #[test]
+    fn subsection_numbers_and_dates_are_not_list_markers() {
+        let html =
+            r#"<ol><li>1.1 Подпункт</li><li>2024. Отчёт</li><li>1.Пункт без пробела</li></ol>"#;
+        let clean = sanitize_fragment(html);
+        assert!(clean.contains("1.1 Подпункт"), "{clean}");
+        assert!(clean.contains("2024. Отчёт"), "{clean}");
+        assert!(clean.contains("1.Пункт без пробела"), "{clean}");
+    }
+
+    #[test]
+    fn list_marker_in_the_middle_of_an_item_is_kept() {
+        let clean = sanitize_fragment(r#"<ol><li>Утвердить 1. пункт</li></ol>"#);
+        assert!(clean.contains("Утвердить 1. пункт"), "{clean}");
+    }
+
+    #[test]
+    fn duplicated_unordered_bullets_are_stripped() {
+        let clean = sanitize_fragment(r#"<ul><li>• Foo</li><li>- Bar</li><li>-5</li></ul>"#);
+        assert!(clean.contains("<li>Foo</li>"), "{clean}");
+        assert!(clean.contains("<li>Bar</li>"), "{clean}");
+        assert!(clean.contains("-5"), "{clean}");
     }
 
     #[test]
