@@ -1856,6 +1856,7 @@ fn result_done(app: &mut OcrApp, ui: &mut egui::Ui) {
     };
     let partial = report.documents_failed > 0 || report.pages_failed > 0;
     let html = first_html(&report);
+    let md = first_md(&report);
     let json = first_json(&report);
 
     badge(
@@ -1934,6 +1935,11 @@ fn result_done(app: &mut OcrApp, ui: &mut egui::Ui) {
         if let Some(html) = html {
             if pixel_button(ui, "ОТКРЫТЬ HTML", ButtonKind::Secondary, true).clicked() {
                 app.open_path(&html);
+            }
+        }
+        if let Some(md) = md {
+            if pixel_button(ui, "ОТКРЫТЬ MD", ButtonKind::Secondary, true).clicked() {
+                app.open_path(&md);
             }
         }
         if let Some(json) = json {
@@ -2748,6 +2754,14 @@ fn first_json(report: &ocr_app::JobReport) -> Option<String> {
         .cloned()
 }
 
+fn first_md(report: &ocr_app::JobReport) -> Option<String> {
+    report
+        .outputs
+        .iter()
+        .find(|path| path.to_ascii_lowercase().ends_with(".md"))
+        .cloned()
+}
+
 /// ETA helper used by the download cards. `started` is reset per file so the
 /// estimate is not polluted by a previous model shard.
 pub(crate) fn download_eta(done: u64, total: u64, started: Option<Instant>) -> Option<Duration> {
@@ -3099,6 +3113,32 @@ mod tests {
         assert_eq!(download_eta(0, 100, Some(Instant::now())), None);
         assert_eq!(download_eta(10, 0, Some(Instant::now())), None);
         assert_eq!(download_eta(10, 100, None), None);
+    }
+
+    fn report_with_outputs(outputs: &[&str]) -> ocr_app::JobReport {
+        ocr_app::JobReport {
+            output_dir: "/out".to_string(),
+            documents_ok: 1,
+            documents_failed: 0,
+            pages_ok: 1,
+            pages_failed: 0,
+            cancelled: false,
+            elapsed_ms: 0,
+            device: "cpu".to_string(),
+            model: "local".to_string(),
+            llama_server: "llama-server".to_string(),
+            outputs: outputs.iter().map(|path| path.to_string()).collect(),
+            documents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn first_md_finds_the_first_markdown_output_case_insensitively() {
+        let report = report_with_outputs(&["/out/a.html", "/out/a.MD", "/out/b.md"]);
+        assert_eq!(first_md(&report).as_deref(), Some("/out/a.MD"));
+
+        let report = report_with_outputs(&["/out/a.html", "/out/a.json"]);
+        assert_eq!(first_md(&report), None);
     }
 
     #[test]

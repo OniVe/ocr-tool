@@ -4,6 +4,10 @@ Captured from the Linux build under headless Xvfb (llvmpipe) with the in-app
 egui screenshot harness; the host GUI was not started.
 
 - Window: 1180×840 (default); `08-min-1000x720.png` is the minimum size.
+- The native Windows decoration is disabled in the app. The top row is the
+  custom pixel title bar: brand on the left; `ЛОКАЛЬНО`, version, `?` and the
+  `—` / `□` / `×` window controls on the right. Under Xvfb there is no window
+  manager, so these shots show the custom bar as the whole window chrome.
 - All visible labels are Russian. Brand and technical names stay as-is:
   `OCR TOOL`, `PDF/PNG/JPEG/TIFF/WebP/BMP`, `HTML/JSON/MD`, `DPI`, `PDFium`,
   `llama-server`, `CTRL/ESC` and the raw log.
