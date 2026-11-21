@@ -41,8 +41,8 @@ fn main() -> eframe::Result<()> {
     ));
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1000.0, 940.0])
-        .with_min_inner_size([900.0, 700.0])
+        .with_inner_size([1180.0, 840.0])
+        .with_min_inner_size([1000.0, 720.0])
         .with_title("ocr-tool — Распознавание документов");
     // The window/taskbar icon is separate from the icon embedded into the exe.
     match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")) {
@@ -56,7 +56,7 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         "ocr-tool",
         options,
-        Box::new(|_cc| Ok(Box::new(OcrApp::new()))),
+        Box::new(|cc| Ok(Box::new(OcrApp::new_with_context(cc)))),
     );
     match &result {
         Ok(()) => gui_log::write("ocr-tool-gui exited normally"),
@@ -288,16 +288,29 @@ struct OcrApp {
     show_password: bool,
     show_details: bool,
     scroll_log: bool,
+    fonts_installed: bool,
     forced_theme: Option<egui::Theme>,
     shot: Option<demo::Shot>,
     started_at: Instant,
 }
 
 impl OcrApp {
+    /// Install the embedded fonts before the first egui pass: `set_fonts` only
+    /// becomes active at the start of the next pass, so doing it inside `draw`
+    /// would panic on the first pixel label.
+    fn new_with_context(cc: &eframe::CreationContext<'_>) -> Self {
+        ui::install_fonts(&cc.egui_ctx);
+        ui::apply_style(&cc.egui_ctx);
+        let mut app = Self::new();
+        app.fonts_installed = true;
+        app
+    }
+
     fn new() -> Self {
         let prefs = prefs::load();
         let demo = demo::Demo::from_env();
         let run_demo = demo.run;
+        let demo_state = demo.state.clone();
         let output = demo
             .output_dir
             .clone()
@@ -402,17 +415,77 @@ impl OcrApp {
             show_password: false,
             show_details: false,
             scroll_log: false,
+            fonts_installed: false,
             forced_theme: demo.theme,
             shot: demo.shot,
             started_at: Instant::now(),
         };
         app.refresh_setup();
+        app.apply_demo_state(demo_state.as_deref());
         // Screenshot harness only: pre-fill state and optionally press the main
         // button once. The flags are inert when the variables are absent.
         if run_demo && app.can_start() {
             app.start();
         }
         app
+    }
+
+    /// Screenshot-only visual states. These do not start a job thread, open a
+    /// socket or touch a document; they only populate the fields the result
+    /// window reads.
+    fn apply_demo_state(&mut self, state: Option<&str>) {
+        match state {
+            Some("done") => {
+                let output = self.output_dir.clone();
+                let files = self.inputs.len().max(1);
+                self.last_report = Some(JobReport {
+                    output_dir: output.clone(),
+                    documents_ok: files,
+                    documents_failed: 0,
+                    pages_ok: 12,
+                    pages_failed: 0,
+                    cancelled: false,
+                    elapsed_ms: 185_000,
+                    device: "gpu".to_string(),
+                    model: "local".to_string(),
+                    llama_server: "llama-server".to_string(),
+                    outputs: vec![
+                        format!("{output}/invoice.md"),
+                        format!("{output}/invoice.html"),
+                        format!("{output}/invoice.json"),
+                    ],
+                    documents: Vec::new(),
+                });
+                self.status = format!("Готово: {} файлов, 12 страниц.", files);
+            }
+            Some("running") => {
+                self.running = true;
+                self.job_started = Some(Instant::now());
+                self.job_files_total = self.inputs.len().max(1);
+                self.job_file_index = 1;
+                self.current_file = self
+                    .inputs
+                    .first()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned());
+                self.page = 2;
+                self.page_total = 5;
+                self.page_selected_index = 2;
+                self.page_selected_total = 5;
+                self.pages_done = 1;
+                self.page_seconds_total = 18.0;
+                self.job_progress = 0.4;
+                self.status = "Страница 2 из 5: распознаём…".to_string();
+            }
+            Some("error") => {
+                self.last_error = Some(
+                    "Не удалось прочитать файл. Он не изменён. Выберите другой файл.".to_string(),
+                );
+                self.last_error_kind = FailureKind::File;
+                self.status = self.last_error.clone().unwrap_or_default();
+            }
+            _ => {}
+        }
     }
 
     fn log(&mut self, text: impl Into<String>, error: bool) {

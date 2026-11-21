@@ -13,6 +13,7 @@
 //! OCR_GUI_DEMO_PAGES=1-3            pre-fill the page selection
 //! OCR_GUI_DEMO_DEVICE=cpu|gpu|auto  pre-select the device
 //! OCR_GUI_DEMO_RUN=1                press Recognize automatically
+//! OCR_GUI_DEMO_STATE=done|running|error  simulate a result state (screenshots)
 //! OCR_GUI_THEME=dark|light          force a theme for the shot
 //! OCR_GUI_DEMO_HELP=1               open the short help window
 //! OCR_GUI_DEMO_ADVANCED=1           open the advanced section
@@ -35,6 +36,7 @@ pub struct Demo {
     pub show_help: bool,
     pub advanced: bool,
     pub run: bool,
+    pub state: Option<String>,
     pub shot: Option<Shot>,
 }
 
@@ -77,6 +79,10 @@ impl Demo {
         let show_help = std::env::var("OCR_GUI_DEMO_HELP").as_deref() == Ok("1");
         let advanced = std::env::var("OCR_GUI_DEMO_ADVANCED").as_deref() == Ok("1");
         let run = std::env::var("OCR_GUI_DEMO_RUN").as_deref() == Ok("1");
+        let state = std::env::var("OCR_GUI_DEMO_STATE")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| matches!(value.as_str(), "done" | "running" | "error"));
         let shot = std::env::var_os("OCR_GUI_SHOT")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty())
@@ -99,6 +105,7 @@ impl Demo {
             show_help,
             advanced,
             run,
+            state,
             shot,
         }
     }
