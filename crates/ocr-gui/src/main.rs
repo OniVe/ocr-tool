@@ -45,7 +45,12 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 840.0])
         .with_min_inner_size([1000.0, 720.0])
-        .with_title("ocr-tool — распознавание документов");
+        .with_title("ocr-tool — распознавание документов")
+        // The pixel header is the title bar: no native white Windows chrome.
+        // The window stays resizable, keeps its icon and appears on the taskbar.
+        .with_decorations(false)
+        .with_resizable(true)
+        .with_taskbar(true);
     // The window/taskbar icon is separate from the icon embedded into the exe.
     match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),

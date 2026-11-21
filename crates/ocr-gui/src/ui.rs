@@ -37,6 +37,13 @@ const BORDER: f32 = 2.0;
 const RAIL_WIDTH: f32 = 252.0;
 const RESULT_WIDTH: f32 = 352.0;
 
+/// The custom title bar replaces the native Windows decoration. Kept at the
+/// previous header height so the brand block is not clipped.
+const HEADER_HEIGHT: f32 = 78.0;
+const WINDOW_CONTROL: f32 = 30.0;
+/// Grab width of the borderless resize frame at every edge and corner.
+const RESIZE_EDGE: f32 = 7.0;
+
 // Embedded OFL fonts, so a packaged exe never depends on a system font.
 const PRESS_START: &[u8] = include_bytes!("../../../assets/fonts/PressStart2P-Regular.ttf");
 const PLEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
@@ -153,7 +160,7 @@ pub fn apply_style(ctx: &egui::Context) {
             visuals.popup_shadow = Shadow::NONE;
             visuals.selection.bg_fill = GREY;
             visuals.selection.stroke = Stroke::new(1.0_f32, INK);
-            visuals.text_cursor.stroke = Stroke::new(2.0_f32, INK);
+            visuals.text_cursor.stroke = Stroke::new(2.0, INK);
             visuals.hyperlink_color = INK;
             visuals.warn_fg_color = INK;
             visuals.error_fg_color = INK;
@@ -565,12 +572,28 @@ pub fn draw(app: &mut OcrApp, ctx: &egui::Context) {
     if app.show_help {
         help_window(app, ctx);
     }
+    // Last, so the thin edge strips sit above every panel.
+    frameless_resize(ctx);
 }
 
 fn header(app: &mut OcrApp, ctx: &egui::Context) {
+    let maximized = ctx
+        .input(|input| input.viewport().maximized)
+        .unwrap_or(false);
     egui::TopBottomPanel::top("header")
+        .exact_height(HEADER_HEIGHT)
         .frame(Frame::new().fill(CREAM).inner_margin(0))
         .show(ctx, |ui| {
+            // The native decoration is off, so this row is the title bar. The
+            // full-width response is registered first: controls allocated later
+            // win egui's hit test, so their clicks are never eaten by the drag.
+            let bar = ui.interact(
+                ui.max_rect(),
+                ui.id().with("window-title-bar"),
+                Sense::click_and_drag(),
+            );
+            let mut control_rects: Vec<Rect> = Vec::new();
+            let mut action = None;
             Frame::new()
                 .inner_margin(Margin::symmetric(20, 10))
                 .show(ui, |ui| {
@@ -584,12 +607,35 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                             ));
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if small_pixel_button(ui, "?", true)
-                                .on_hover_text("Как это работает")
-                                .clicked()
-                            {
+                            ui.scope(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let close = window_control(ui, WindowGlyph::Close, "Закрыть");
+                                if close.clicked() {
+                                    action = Some(WindowAction::Close);
+                                }
+                                let (glyph, tooltip) = if maximized {
+                                    (WindowGlyph::Restore, "Восстановить")
+                                } else {
+                                    (WindowGlyph::Maximize, "Развернуть")
+                                };
+                                let maximize = window_control(ui, glyph, tooltip);
+                                if maximize.clicked() {
+                                    action = Some(WindowAction::MaximizeToggle);
+                                }
+                                let minimize =
+                                    window_control(ui, WindowGlyph::Minimize, "Свернуть");
+                                if minimize.clicked() {
+                                    action = Some(WindowAction::Minimize);
+                                }
+                                control_rects.extend([close.rect, maximize.rect, minimize.rect]);
+                            });
+                            ui.add_space(10.0);
+                            let help =
+                                small_pixel_button(ui, "?", true).on_hover_text("Как это работает");
+                            if help.clicked() {
                                 app.show_help = !app.show_help;
                             }
+                            control_rects.push(help.rect);
                             ui.add_space(8.0);
                             ui.label(mono_text(
                                 format!("v{} / ЛОКАЛЬНО", env!("CARGO_PKG_VERSION")),
@@ -600,12 +646,214 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                         });
                     });
                 });
+            // A press that began on a control must never turn into a window drag.
+            let press_origin = ctx.input(|input| input.pointer.press_origin());
+            let on_control =
+                press_origin.is_some_and(|pos| control_rects.iter().any(|rect| rect.contains(pos)));
+            if !on_control {
+                if bar.drag_started_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if bar.double_clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
+            }
+            match action {
+                Some(WindowAction::Close) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Some(WindowAction::Minimize) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                Some(WindowAction::MaximizeToggle) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
+                None => {}
+            }
             let rect = ui.max_rect();
             ui.painter().hline(
                 rect.x_range(),
                 rect.bottom() - 1.0,
                 Stroke::new(BORDER, INK),
             );
+        });
+}
+
+#[derive(Clone, Copy)]
+enum WindowGlyph {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+#[derive(Clone, Copy)]
+enum WindowAction {
+    Minimize,
+    MaximizeToggle,
+    Close,
+}
+
+/// A 30×30 pixel button: square, 2 px ink border, no rounding. Close (and every
+/// other control on hover) inverts to a black fill with a white glyph.
+fn window_control(ui: &mut egui::Ui, glyph: WindowGlyph, tooltip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(WINDOW_CONTROL), Sense::click());
+    let hovered = response.hovered();
+    let pressed = response.is_pointer_button_down_on();
+    let (fill, fg) = if pressed {
+        (GREY, INK)
+    } else if hovered {
+        (INK, WHITE)
+    } else {
+        (PANEL, INK)
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::ZERO,
+        fill,
+        Stroke::new(BORDER, INK),
+        StrokeKind::Inside,
+    );
+    let center = rect.center();
+    match glyph {
+        WindowGlyph::Minimize => {
+            ui.painter().rect_filled(
+                Rect::from_center_size(center + Vec2::new(0.0, 4.0), Vec2::new(10.0, 2.0)),
+                CornerRadius::ZERO,
+                fg,
+            );
+        }
+        WindowGlyph::Maximize => {
+            ui.painter().rect_stroke(
+                Rect::from_center_size(center, Vec2::splat(10.0)),
+                CornerRadius::ZERO,
+                Stroke::new(2.0_f32, fg),
+                StrokeKind::Inside,
+            );
+        }
+        WindowGlyph::Restore => {
+            let back = Rect::from_min_size(center + Vec2::new(-3.0, -5.0), Vec2::splat(8.0));
+            let front = Rect::from_min_size(center + Vec2::new(-5.0, -3.0), Vec2::splat(8.0));
+            ui.painter().rect_stroke(
+                back,
+                CornerRadius::ZERO,
+                Stroke::new(2.0_f32, fg),
+                StrokeKind::Inside,
+            );
+            ui.painter().rect(
+                front,
+                CornerRadius::ZERO,
+                fill,
+                Stroke::new(2.0_f32, fg),
+                StrokeKind::Inside,
+            );
+        }
+        WindowGlyph::Close => {
+            // A 2 px pixel X: five square steps per diagonal, no anti-aliasing.
+            for step in -2..=2 {
+                let offset = step as f32 * 2.0;
+                for (x, y) in [(offset, offset), (offset, -offset)] {
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(center + Vec2::new(x - 1.0, y - 1.0), Vec2::splat(2.0)),
+                        CornerRadius::ZERO,
+                        fg,
+                    );
+                }
+            }
+        }
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
+}
+
+/// Borderless windows have no native resize frame. Eight thin foreground strips
+/// restore the edges/corners: the cursor changes there and a primary press asks
+/// winit to start an OS resize. Skipped while maximized.
+fn frameless_resize(ctx: &egui::Context) {
+    if ctx
+        .input(|input| input.viewport().maximized)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let edge = RESIZE_EDGE;
+    let inner = screen.shrink(edge);
+    let (l, r, t, b) = (screen.left(), screen.right(), screen.top(), screen.bottom());
+    let directions: [(egui::ResizeDirection, Rect, egui::CursorIcon); 8] = [
+        (
+            egui::ResizeDirection::North,
+            Rect::from_min_max(
+                egui::pos2(inner.left(), t),
+                egui::pos2(inner.right(), t + edge),
+            ),
+            egui::CursorIcon::ResizeNorth,
+        ),
+        (
+            egui::ResizeDirection::South,
+            Rect::from_min_max(
+                egui::pos2(inner.left(), b - edge),
+                egui::pos2(inner.right(), b),
+            ),
+            egui::CursorIcon::ResizeSouth,
+        ),
+        (
+            egui::ResizeDirection::West,
+            Rect::from_min_max(
+                egui::pos2(l, inner.top()),
+                egui::pos2(l + edge, inner.bottom()),
+            ),
+            egui::CursorIcon::ResizeWest,
+        ),
+        (
+            egui::ResizeDirection::East,
+            Rect::from_min_max(
+                egui::pos2(r - edge, inner.top()),
+                egui::pos2(r, inner.bottom()),
+            ),
+            egui::CursorIcon::ResizeEast,
+        ),
+        (
+            egui::ResizeDirection::NorthWest,
+            Rect::from_min_max(egui::pos2(l, t), egui::pos2(l + edge, t + edge)),
+            egui::CursorIcon::ResizeNorthWest,
+        ),
+        (
+            egui::ResizeDirection::NorthEast,
+            Rect::from_min_max(egui::pos2(r - edge, t), egui::pos2(r, t + edge)),
+            egui::CursorIcon::ResizeNorthEast,
+        ),
+        (
+            egui::ResizeDirection::SouthWest,
+            Rect::from_min_max(egui::pos2(l, b - edge), egui::pos2(l + edge, b)),
+            egui::CursorIcon::ResizeSouthWest,
+        ),
+        (
+            egui::ResizeDirection::SouthEast,
+            Rect::from_min_max(egui::pos2(r - edge, b - edge), egui::pos2(r, b)),
+            egui::CursorIcon::ResizeSouthEast,
+        ),
+    ];
+    egui::Area::new(egui::Id::new("frameless-resize"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.set_clip_rect(screen);
+            ui.allocate_space(screen.size());
+            for (index, (direction, rect, cursor)) in directions.into_iter().enumerate() {
+                let response = ui.interact(
+                    rect,
+                    egui::Id::new(("frameless-resize-edge", index)),
+                    Sense::click_and_drag(),
+                );
+                if response.is_pointer_button_down_on()
+                    && ui.ctx().input(|input| input.pointer.primary_pressed())
+                {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                }
+                let _ = response.on_hover_cursor(cursor);
+            }
         });
 }
 
