@@ -1,7 +1,8 @@
 //! Remembered GUI preferences.
 //!
 //! Only harmless choices are stored: the output folder, the output format, the
-//! device and the DPI. Passwords, document names and document contents are
+//! device, the DPI, the tool folders (model, runtime, llama-server, PDFium) and
+//! the advanced limits. Passwords, document names and document contents are
 //! never written here. The file lives next to the GUI log in the platform
 //! app-data folder (`%LOCALAPPDATA%\ocr-tool\gui-prefs.json` on Windows) and is
 //! deliberately best-effort: an unreadable or malformed file falls back to the
@@ -41,6 +42,33 @@ pub struct GuiPrefs {
     /// PDF pages in flight: 1 or 2.
     #[serde(default)]
     pub parallel_pages: Option<u32>,
+    /// Explicit model folder (advanced); empty means auto-discovery.
+    #[serde(default)]
+    pub model_dir: String,
+    /// Runtime folder shared by llama-server and PDFium lookup.
+    #[serde(default)]
+    pub runtime_dir: String,
+    /// Explicit llama-server folder or executable (advanced).
+    #[serde(default)]
+    pub llama_dir: String,
+    /// Explicit PDFium library path (advanced).
+    #[serde(default)]
+    pub pdfium: String,
+    /// Page selection typed by the user, e.g. `1-5,7`.
+    #[serde(default)]
+    pub pages: String,
+    /// Walk subfolders of added folders.
+    #[serde(default)]
+    pub recursive: bool,
+    /// Advanced pixel cap; zero means "not stored yet" (use the default).
+    #[serde(default)]
+    pub max_pixels: u64,
+    /// Advanced token cap; zero means "not stored yet" (use the default).
+    #[serde(default)]
+    pub max_tokens: u32,
+    /// Advanced request timeout; zero means "not stored yet" (use the default).
+    #[serde(default)]
+    pub timeout_secs: u64,
 }
 
 impl GuiPrefs {
@@ -80,6 +108,34 @@ impl GuiPrefs {
         self.parallel_pages
             .unwrap_or(1)
             .clamp(1, MAX_PARALLEL_PAGES)
+    }
+
+    /// Advanced pixel cap; zero is the missing-field value from an older file.
+    pub fn max_pixels_or(&self, default: u64) -> u64 {
+        if self.max_pixels == 0 {
+            default
+        } else {
+            self.max_pixels
+        }
+    }
+
+    /// Advanced token cap; zero is the missing-field value from an older file.
+    pub fn max_tokens_or(&self, default: u32) -> u32 {
+        if self.max_tokens == 0 {
+            default
+        } else {
+            self.max_tokens
+        }
+    }
+
+    /// Advanced request timeout; zero is the missing-field value from an older
+    /// file.
+    pub fn timeout_secs_or(&self, default: u64) -> u64 {
+        if self.timeout_secs == 0 {
+            default
+        } else {
+            self.timeout_secs
+        }
     }
 }
 
@@ -163,9 +219,82 @@ mod tests {
             fast: Some(true),
             image_max_tokens: Some(2048),
             parallel_pages: Some(2),
+            model_dir: "E:\\модели\\Qwen".to_string(),
+            runtime_dir: "D:\\runtime".to_string(),
+            llama_dir: "D:\\runtime\\llama".to_string(),
+            pdfium: "D:\\runtime\\pdfium.dll".to_string(),
+            pages: "1-5,7".to_string(),
+            recursive: true,
+            max_pixels: 200_000_000,
+            max_tokens: 8192,
+            timeout_secs: 900,
         };
         save_to(&path, &prefs).unwrap();
         assert_eq!(load_from(&path), prefs);
+    }
+
+    #[test]
+    fn old_preferences_without_new_fields_load_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui-prefs.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "output_dir": "C:\\выход",
+                "format": "all",
+                "device": "cpu",
+                "dpi": 240,
+                "extract_blocks": "all",
+                "fast": true,
+                "parallel_pages": 2
+            }"#,
+        )
+        .unwrap();
+        let prefs = load_from(&path);
+        assert_eq!(prefs.output_dir.as_deref(), Some("C:\\выход"));
+        assert_eq!(prefs.format.as_deref(), Some("all"));
+        assert!(prefs.model_dir.is_empty());
+        assert!(prefs.runtime_dir.is_empty());
+        assert!(prefs.llama_dir.is_empty());
+        assert!(prefs.pdfium.is_empty());
+        assert!(prefs.pages.is_empty());
+        assert!(!prefs.recursive);
+        assert_eq!(prefs.max_pixels, 0);
+        assert_eq!(prefs.max_tokens, 0);
+        assert_eq!(prefs.timeout_secs, 0);
+        assert_eq!(prefs.max_pixels_or(400_000_000), 400_000_000);
+        assert_eq!(prefs.max_tokens_or(4096), 4096);
+        assert_eq!(prefs.timeout_secs_or(600), 600);
+    }
+
+    #[test]
+    fn saved_tool_paths_and_limits_are_returned() {
+        let prefs = GuiPrefs {
+            model_dir: "E:\\модели".to_string(),
+            runtime_dir: "D:\\движок".to_string(),
+            llama_dir: "D:\\движок\\llama-server.exe".to_string(),
+            pdfium: "D:\\движок\\pdfium.dll".to_string(),
+            pages: "2,4-6".to_string(),
+            recursive: true,
+            max_pixels: 123_000_000,
+            max_tokens: 3072,
+            timeout_secs: 1200,
+            ..GuiPrefs::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui-prefs.json");
+        save_to(&path, &prefs).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.model_dir, "E:\\модели");
+        assert_eq!(loaded.runtime_dir, "D:\\движок");
+        assert_eq!(loaded.llama_dir, "D:\\движок\\llama-server.exe");
+        assert_eq!(loaded.pdfium, "D:\\движок\\pdfium.dll");
+        assert_eq!(loaded.pages, "2,4-6");
+        assert!(loaded.recursive);
+        assert_eq!(loaded.max_pixels_or(400_000_000), 123_000_000);
+        assert_eq!(loaded.max_tokens_or(4096), 3072);
+        assert_eq!(loaded.timeout_secs_or(600), 1200);
     }
 
     #[test]

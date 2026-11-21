@@ -1936,41 +1936,62 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             ui.end_row();
 
             ui.label(mono_text("Страницы", 10.0, MUTED));
-            ui.add(
-                egui::TextEdit::singleline(&mut app.pages)
-                    .hint_text("все, например 1-5,7")
-                    .desired_width(220.0),
-            );
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.pages)
+                        .hint_text("все, например 1-5,7")
+                        .desired_width(220.0),
+                )
+                .changed()
+            {
+                app.save_prefs();
+            }
             ui.end_row();
 
             ui.label(mono_text("МАКС. ПИКСЕЛЕЙ", 10.0, MUTED));
-            ui.add(
-                egui::DragValue::new(&mut app.max_pixels)
-                    .range(1_000_000..=400_000_000)
-                    .speed(1_000_000.0),
-            );
+            if ui
+                .add(
+                    egui::DragValue::new(&mut app.max_pixels)
+                        .range(1_000_000..=400_000_000)
+                        .speed(1_000_000.0),
+                )
+                .changed()
+            {
+                app.save_prefs();
+            }
             ui.end_row();
 
             ui.label(mono_text("МАКС. ТОКЕНОВ", 10.0, MUTED));
-            ui.add(
-                egui::DragValue::new(&mut app.max_tokens)
-                    .range(128..=32_768)
-                    .speed(64.0),
-            );
+            if ui
+                .add(
+                    egui::DragValue::new(&mut app.max_tokens)
+                        .range(128..=32_768)
+                        .speed(64.0),
+                )
+                .changed()
+            {
+                app.save_prefs();
+            }
             ui.end_row();
 
             ui.label(mono_text("ТАЙМАУТ, С", 10.0, MUTED));
-            ui.add(
-                egui::DragValue::new(&mut app.timeout_secs)
-                    .range(30..=7200)
-                    .speed(10.0),
-            );
+            if ui
+                .add(
+                    egui::DragValue::new(&mut app.timeout_secs)
+                        .range(30..=7200)
+                        .speed(10.0),
+                )
+                .changed()
+            {
+                app.save_prefs();
+            }
             ui.end_row();
 
             ui.label(mono_text("Подпапки", 10.0, MUTED));
             let mut recursive = app.recursive;
             if check_row(ui, &mut recursive, "Обходить вложенные папки", "") {
                 app.recursive = recursive;
+                app.save_prefs();
             }
             ui.end_row();
 
@@ -2018,6 +2039,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
     }
     if changed {
         app.refresh_setup();
+        app.save_prefs();
     }
 }
 
@@ -2467,6 +2489,7 @@ impl OcrApp {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
             self.add_paths([folder]);
             self.recursive = true;
+            self.save_prefs();
             self.status = format!("Добавлена папка. Файлов в списке: {}.", self.inputs.len());
         }
     }
@@ -2487,6 +2510,7 @@ impl OcrApp {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
             self.model_dir = folder.display().to_string();
             self.refresh_setup();
+            self.save_prefs();
             self.clear_setup_error_if_fixed();
             if self.model_status.is_ready() {
                 self.download_notice = false;
@@ -2509,6 +2533,7 @@ impl OcrApp {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
             self.llama_dir = folder.display().to_string();
             self.refresh_setup();
+            self.save_prefs();
             self.clear_setup_error_if_fixed();
             if self.runtime.is_ready() {
                 self.download_notice = false;
@@ -2523,6 +2548,7 @@ impl OcrApp {
         {
             self.pdfium = file.display().to_string();
             self.refresh_setup();
+            self.save_prefs();
             self.clear_setup_error_if_fixed();
             if self.runtime.is_ready() {
                 self.download_notice = false;
@@ -2618,6 +2644,15 @@ impl OcrApp {
             fast: Some(self.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS),
             image_max_tokens: Some(self.image_max_tokens),
             parallel_pages: Some(self.parallel_pages),
+            model_dir: self.model_dir.clone(),
+            runtime_dir: self.runtime_dir.clone(),
+            llama_dir: self.llama_dir.clone(),
+            pdfium: self.pdfium.clone(),
+            pages: self.pages.clone(),
+            recursive: self.recursive,
+            max_pixels: self.max_pixels,
+            max_tokens: self.max_tokens,
+            timeout_secs: self.timeout_secs,
         });
     }
 }

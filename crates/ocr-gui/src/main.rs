@@ -334,6 +334,17 @@ impl OcrApp {
         let dpi = prefs.dpi.unwrap_or(192).clamp(72, 600);
         let image_max_tokens = prefs.image_max_tokens(DEFAULT_IMAGE_MAX_TOKENS);
         let parallel_pages = prefs.parallel_pages();
+        // Tool paths are restored verbatim, even when they no longer exist: the
+        // setup panel then shows "missing" and the user can fix the field
+        // instead of silently falling back to auto-discovery.
+        let model_dir = prefs.model_dir.clone();
+        let runtime_dir = prefs.runtime_dir.clone();
+        let llama_dir = prefs.llama_dir.clone();
+        let pdfium = prefs.pdfium.clone();
+        let pages = demo.pages.clone().unwrap_or_else(|| prefs.pages.clone());
+        let max_pixels = prefs.max_pixels_or(DEFAULT_MAX_PIXELS);
+        let max_tokens = prefs.max_tokens_or(DEFAULT_MAX_TOKENS);
+        let timeout_secs = prefs.timeout_secs_or(600);
 
         let mut app = Self {
             inputs: demo.inputs,
@@ -342,18 +353,18 @@ impl OcrApp {
             extract_blocks,
             device,
             dpi,
-            pages: demo.pages.unwrap_or_default(),
+            pages,
             password: String::new(),
-            recursive: false,
-            model_dir: String::new(),
-            llama_dir: String::new(),
-            pdfium: String::new(),
-            runtime_dir: String::new(),
-            max_pixels: DEFAULT_MAX_PIXELS,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            recursive: prefs.recursive,
+            model_dir,
+            llama_dir,
+            pdfium,
+            runtime_dir,
+            max_pixels,
+            max_tokens,
             image_max_tokens,
             parallel_pages,
-            timeout_secs: 600,
+            timeout_secs,
 
             running: false,
             cancelling: false,
@@ -795,6 +806,7 @@ impl OcrApp {
             !self.runtime.is_ready(),
         );
         self.status = status;
+        self.save_prefs();
     }
 
     /// Called when the Runtime folder text field changes. The folder drives
@@ -817,6 +829,7 @@ impl OcrApp {
         if self.runtime.is_ready() {
             self.download_notice = false;
         }
+        self.save_prefs();
     }
 
     /// Download llama-vulkan + llama-cpu + PDFium into the runtime folder.
@@ -1358,6 +1371,7 @@ impl eframe::App for OcrApp {
             self.add_paths(dropped);
             if has_folder {
                 self.recursive = true;
+                self.save_prefs();
             }
             self.status = format!(
                 "Добавлено в список: {}. Выберите папку и нажмите «Распознать».",
