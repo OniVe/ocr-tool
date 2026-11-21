@@ -1,46 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="ocr-tool">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#3B82F6"/>
-      <stop offset="1" stop-color="#2563EB"/>
-    </linearGradient>
-    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#DBEAFE"/>
-      <stop offset="1" stop-color="#BFDBFE"/>
-    </linearGradient>
-    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#06B6D4"/>
-      <stop offset="1" stop-color="#14B8A6"/>
-    </linearGradient>
-    <linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#06B6D4" stop-opacity="0"/>
-      <stop offset="0.5" stop-color="#06B6D4" stop-opacity="0.30"/>
-      <stop offset="1" stop-color="#06B6D4" stop-opacity="0"/>
-    </linearGradient>
-  </defs>
-
-  <!-- Rounded app tile; everything outside stays transparent. -->
-  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#tile)"/>
-  <rect x="40" y="40" width="944" height="944" rx="208" fill="none"
-        stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="8"/>
-
-  <!-- Soft drop shadow under the sheet. -->
-  <path d="M 326 208 H 598 L 750 360 V 806 Q 750 852 704 852 H 326 Q 280 852 280 806 V 254 Q 280 208 326 208 Z"
-        fill="#1E40AF" opacity="0.28"/>
-
-  <!-- White document with a folded top-right corner. -->
-  <path d="M 326 190 H 592 L 738 336 V 794 Q 738 834 698 834 H 326 Q 286 834 286 794 V 230 Q 286 190 326 190 Z"
-        fill="#FFFFFF"/>
-  <path d="M 592 190 L 738 336 L 610 336 Q 592 336 592 318 Z"
-        fill="url(#fold)"/>
-
-  <!-- Three text rows. -->
-  <rect x="350" y="402" width="250" height="38" rx="19" fill="#1E3A8A"/>
-  <rect x="350" y="480" width="312" height="38" rx="19" fill="#1E3A8A"/>
-  <rect x="350" y="558" width="208" height="38" rx="19" fill="#1E3A8A"/>
-
-  <!-- Turquoise scan beam across the sheet. -->
-  <rect x="210" y="646" width="604" height="140" rx="70" fill="url(#glow)"/>
-  <rect x="232" y="696" width="560" height="44" rx="22" fill="url(#beam)"/>
-  <rect x="262" y="709" width="500" height="10" rx="5" fill="#FFFFFF" opacity="0.22"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="ocr-tool" shape-rendering="crispEdges">
+  <title>ocr-tool</title>
+  <rect width="1024" height="1024" fill="#F2EFE7"/>
+  <rect x="0" y="0" width="1024" height="64" fill="#111111"/>
+  <rect x="0" y="64" width="64" height="64" fill="#111111"/>
+  <rect x="960" y="64" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="128" width="64" height="64" fill="#111111"/>
+  <rect x="960" y="128" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="192" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="192" width="384" height="64" fill="#111111"/>
+  <rect x="960" y="192" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="256" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="256" width="448" height="64" fill="#111111"/>
+  <rect x="960" y="256" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="320" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="320" width="128" height="64" fill="#111111"/>
+  <rect x="640" y="320" width="128" height="64" fill="#111111"/>
+  <rect x="960" y="320" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="384" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="384" width="512" height="64" fill="#111111"/>
+  <rect x="960" y="384" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="448" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="448" width="128" height="64" fill="#111111"/>
+  <rect x="704" y="448" width="64" height="64" fill="#111111"/>
+  <rect x="960" y="448" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="512" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="512" width="512" height="64" fill="#111111"/>
+  <rect x="960" y="512" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="576" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="576" width="128" height="64" fill="#111111"/>
+  <rect x="576" y="576" width="192" height="64" fill="#111111"/>
+  <rect x="960" y="576" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="640" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="640" width="512" height="64" fill="#111111"/>
+  <rect x="960" y="640" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="704" width="64" height="64" fill="#111111"/>
+  <rect x="256" y="704" width="512" height="64" fill="#111111"/>
+  <rect x="960" y="704" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="768" width="64" height="64" fill="#111111"/>
+  <rect x="960" y="768" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="832" width="64" height="64" fill="#111111"/>
+  <rect x="128" y="832" width="768" height="64" fill="#111111"/>
+  <rect x="960" y="832" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="896" width="64" height="64" fill="#111111"/>
+  <rect x="960" y="896" width="64" height="64" fill="#111111"/>
+  <rect x="0" y="960" width="1024" height="64" fill="#111111"/>
 </svg>
