@@ -3277,7 +3277,7 @@ mod tests {
         let center = button_rect.center();
         let mut clicked = false;
         let mut frame = |time: f64, events: Vec<egui::Event>| {
-            ctx.run(test_raw(time, events), |ctx| {
+            let _ = ctx.run(test_raw(time, events), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     clicked |= ui.put(button_rect, egui::Button::new("test")).clicked();
                 });
@@ -3294,7 +3294,7 @@ mod tests {
     #[test]
     fn frameless_edge_requests_resize_and_center_does_not() {
         let ctx = egui::Context::default();
-        let mut frame = |time: f64, events: Vec<egui::Event>| {
+        let frame = |time: f64, events: Vec<egui::Event>| {
             ctx.run(test_raw(time, events), |ctx| {
                 egui::CentralPanel::default().show(ctx, |_| {});
                 frameless_resize(ctx);
