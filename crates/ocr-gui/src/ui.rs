@@ -160,7 +160,7 @@ pub fn apply_style(ctx: &egui::Context) {
             visuals.popup_shadow = Shadow::NONE;
             visuals.selection.bg_fill = GREY;
             visuals.selection.stroke = Stroke::new(1.0_f32, INK);
-            visuals.text_cursor.stroke = Stroke::new(2.0, INK);
+            visuals.text_cursor.stroke = Stroke::new(2.0_f32, INK);
             visuals.hyperlink_color = INK;
             visuals.warn_fg_color = INK;
             visuals.error_fg_color = INK;
