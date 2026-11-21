@@ -431,6 +431,22 @@ impl OcrServer {
         self.log_path.as_deref()
     }
 
+    /// True while the sidecar process is still running. A preloaded server can
+    /// outlive several jobs, so callers must re-check this before reusing it:
+    /// the process may have crashed or been killed by the OS.
+    pub fn is_alive(&self) -> bool {
+        if self.killed.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Ok(mut guard) = self.child.lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
     /// Send one image and return the model's raw HTML answer.
     pub fn recognize_jpeg(&self, jpeg: &[u8], max_tokens: u32) -> Result<String> {
         if self.killed.load(Ordering::Relaxed) {
@@ -1150,6 +1166,47 @@ mod tests {
     fn ocr_server_can_be_shared_by_two_page_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<OcrServer>();
+    }
+
+    #[test]
+    fn is_alive_follows_the_sidecar_process() {
+        #[cfg(windows)]
+        let child = Command::new("cmd")
+            .args(["/C", "ping", "-n", "20", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a long-running test child");
+        #[cfg(unix)]
+        let child = Command::new("sh")
+            .args(["-c", "sleep 20"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a long-running test child");
+        #[cfg(not(any(windows, unix)))]
+        let child = Command::new("true").spawn().expect("spawn a test child");
+
+        let server = OcrServer {
+            child: Mutex::new(Some(child)),
+            port: 0,
+            device_used: Device::Cpu,
+            exe: PathBuf::from("llama-server-test"),
+            models: ModelPaths {
+                dir: PathBuf::from("test"),
+                model: PathBuf::from("test/model.gguf"),
+                mmproj: PathBuf::from("test/mmproj.gguf"),
+            },
+            log_path: None,
+            request_timeout: Duration::from_secs(1),
+            killed: AtomicBool::new(false),
+            #[cfg(windows)]
+            job_handle: std::sync::atomic::AtomicUsize::new(0),
+        };
+        assert!(server.is_alive(), "a freshly spawned child must be alive");
+
+        server.kill();
+        assert!(!server.is_alive(), "a killed child must not be alive");
     }
 
     #[test]

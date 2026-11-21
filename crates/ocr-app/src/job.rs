@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -24,7 +25,7 @@ use walkdir::WalkDir;
 use crate::device_name;
 use crate::download::check_model_sizes;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JobOptions {
     pub inputs: Vec<PathBuf>,
     pub output_dir: PathBuf,
@@ -48,6 +49,10 @@ pub struct JobOptions {
     pub request_timeout_secs: u64,
     /// Write per-block crops and typed files (`none`/`images`/`all`).
     pub extract_blocks: BlockExtraction,
+    /// A llama-server started in advance by the GUI. When it is still alive it
+    /// is reused for this job and is not killed when the job finishes. CLI jobs
+    /// never set this field (`None` keeps the one-server-per-job behaviour).
+    pub preloaded_server: Option<Arc<OcrServer>>,
 }
 
 impl JobOptions {
@@ -81,6 +86,7 @@ impl Default for JobOptions {
             parallel_pages: DEFAULT_PARALLEL_PAGES,
             request_timeout_secs: 600,
             extract_blocks: BlockExtraction::None,
+            preloaded_server: None,
         }
     }
 }
@@ -321,14 +327,37 @@ pub fn run_job(
     engine_config.request_timeout = Duration::from_secs(options.request_timeout_secs.max(1));
     engine_config.llama_dir = options.llama_dir.clone();
 
-    let server = {
-        let mut engine_log = |message: &str| {
+    let server: Arc<OcrServer> = match options
+        .preloaded_server
+        .as_ref()
+        .filter(|server| server.is_alive())
+    {
+        Some(server) => {
             events(ProgressEvent::Log {
                 level: ocr_core::LogLevel::Info,
-                message: message.to_string(),
+                message: format!(
+                    "using preloaded engine on 127.0.0.1:{} ({})",
+                    server.port(),
+                    device_name(server.device_used())
+                ),
             });
-        };
-        OcrServer::start(&engine_config, cancel, &mut engine_log)?
+            Arc::clone(server)
+        }
+        None => {
+            if options.preloaded_server.is_some() {
+                events(ProgressEvent::Log {
+                    level: ocr_core::LogLevel::Warning,
+                    message: "preloaded engine unavailable; starting a new engine".to_string(),
+                });
+            }
+            let mut engine_log = |message: &str| {
+                events(ProgressEvent::Log {
+                    level: ocr_core::LogLevel::Info,
+                    message: message.to_string(),
+                });
+            };
+            Arc::new(OcrServer::start(&engine_config, cancel, &mut engine_log)?)
+        }
     };
 
     events(ProgressEvent::Log {
@@ -401,7 +430,7 @@ pub fn run_job(
             file,
             &prepared,
             options,
-            &server,
+            server.as_ref(),
             renderer.as_ref(),
             &mut allocator,
             cancel,
@@ -2538,6 +2567,10 @@ mod tests {
         assert_eq!(options.image_max_tokens, DEFAULT_IMAGE_MAX_TOKENS);
         assert_eq!(options.effective_parallel_pages(), 1);
         assert!(!options.is_fast());
+        assert!(
+            options.preloaded_server.is_none(),
+            "CLI/default jobs must start their own engine"
+        );
     }
 
     #[test]

@@ -27,7 +27,9 @@ use ocr_core::{
     default_runtime_dir, resolve_model_dir, BlockExtraction, Device, LogLevel, OutputFormat,
     ProgressEvent, MODEL_ENV,
 };
-use ocr_engine::{DEFAULT_IMAGE_MAX_TOKENS, DEFAULT_MAX_TOKENS};
+use ocr_engine::{
+    server_tuning, EngineConfig, OcrServer, DEFAULT_IMAGE_MAX_TOKENS, DEFAULT_MAX_TOKENS,
+};
 use ocr_pdf::DEFAULT_MAX_PIXELS;
 
 fn main() -> eframe::Result<()> {
@@ -95,6 +97,7 @@ enum Msg {
     DownloadDone(Result<Vec<PathBuf>, String>),
     Runtime(RuntimeProgress),
     RuntimeDone(Result<RuntimeInstall, String>),
+    PreloadDone(Result<Arc<OcrServer>, String>),
 }
 
 /// Sends `Msg::Done` when the worker disappears, including a panic unwind that
@@ -180,6 +183,34 @@ impl Drop for RuntimeGuard {
     }
 }
 
+/// Safety net for the background preload thread: a panic must clear the
+/// `preloading` flag instead of leaving Recognize disabled forever.
+struct PreloadGuard {
+    tx: Sender<Msg>,
+    sent: bool,
+}
+
+impl PreloadGuard {
+    fn new(tx: Sender<Msg>) -> Self {
+        Self { tx, sent: false }
+    }
+
+    fn finish(&mut self, result: Result<Arc<OcrServer>, String>) {
+        let _ = self.tx.send(Msg::PreloadDone(result));
+        self.sent = true;
+    }
+}
+
+impl Drop for PreloadGuard {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.tx.send(Msg::PreloadDone(Err(
+                "preload thread panicked before reporting a result".to_string(),
+            )));
+        }
+    }
+}
+
 /// What the user can do after an error. Kept separate from the message so the
 /// error card can offer the right button instead of a generic "try again".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -234,6 +265,8 @@ struct OcrApp {
     image_max_tokens: u32,
     /// PDF pages recognized at the same time (1 or 2).
     parallel_pages: u32,
+    /// Keep llama-server loaded between jobs (preferences toggle, default on).
+    preload_model: bool,
     timeout_secs: u64,
 
     running: bool,
@@ -248,6 +281,18 @@ struct OcrApp {
     last_error: Option<String>,
     last_error_kind: FailureKind,
     download_notice: bool,
+
+    /// A sidecar kept alive between jobs. `None` means the next job starts its
+    /// own engine (CLI behaviour and the fallback after a preload failure).
+    preloaded: Option<Arc<OcrServer>>,
+    preloading: bool,
+    /// Configuration the current `preloaded`/`preloading` state belongs to.
+    preload_key: Option<String>,
+    preload_rx: Option<Receiver<Msg>>,
+    preload_error: Option<String>,
+    preload_cancel: Option<Arc<AtomicBool>>,
+    /// Demo/screenshot runs must never download the model into VRAM.
+    demo_run: bool,
 
     job_started: Option<Instant>,
     job_files_total: usize,
@@ -334,6 +379,10 @@ impl OcrApp {
         let dpi = prefs.dpi.unwrap_or(192).clamp(72, 600);
         let image_max_tokens = prefs.image_max_tokens(DEFAULT_IMAGE_MAX_TOKENS);
         let parallel_pages = prefs.parallel_pages();
+        let preload_model = prefs.preload_model;
+        // The screenshot harness and simulated states must stay cheap: no
+        // sidecar, no model load, no VRAM use while taking a picture.
+        let demo_run = demo.run || demo.shot.is_some() || demo.state.is_some();
         // Tool paths are restored verbatim, even when they no longer exist: the
         // setup panel then shows "missing" and the user can fix the field
         // instead of silently falling back to auto-discovery.
@@ -364,6 +413,7 @@ impl OcrApp {
             max_tokens,
             image_max_tokens,
             parallel_pages,
+            preload_model,
             timeout_secs,
 
             running: false,
@@ -378,6 +428,14 @@ impl OcrApp {
             last_error: None,
             last_error_kind: FailureKind::Unknown,
             download_notice: false,
+
+            preloaded: None,
+            preloading: false,
+            preload_key: None,
+            preload_rx: None,
+            preload_error: None,
+            preload_cancel: None,
+            demo_run,
 
             job_started: None,
             job_files_total: 0,
@@ -432,6 +490,7 @@ impl OcrApp {
             started_at: Instant::now(),
         };
         app.refresh_setup();
+        app.maybe_start_preload();
         app.apply_demo_state(demo_state.as_deref());
         // Screenshot harness only: pre-fill state and optionally press the main
         // button once. The flags are inert when the variables are absent.
@@ -545,6 +604,206 @@ impl OcrApp {
         }
     }
 
+    /// Preload is a convenience, never part of tests or the screenshot harness.
+    fn preload_allowed(&self) -> bool {
+        !self.demo_run && !cfg!(test) && std::env::var_os("OCR_GUI_NO_PRELOAD").is_none()
+    }
+
+    /// Configuration fingerprint of the sidecar. A preloaded server is reused
+    /// only for an identical model/runtime/device/quality/parallel setup.
+    fn preload_key(&self) -> Option<String> {
+        if !self.setup_complete() {
+            return None;
+        }
+        let model_dir = self.resolved_model_dir();
+        let llama_dir = non_empty_path(&self.llama_dir);
+        Some(format!(
+            "model={}|llama={}|runtime={}|pdfium={}|device={}|image_tokens={}|parallel={}|timeout={}",
+            model_dir.display(),
+            llama_dir
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            self.runtime_dir.trim(),
+            self.pdfium.trim(),
+            self.device.as_str(),
+            self.image_max_tokens,
+            self.parallel_pages.clamp(1, 2),
+            self.timeout_secs,
+        ))
+    }
+
+    /// `EngineConfig` matching the next job exactly: same model/llama paths,
+    /// device, image-token budget and page parallelism.
+    fn preload_engine_config(&self) -> EngineConfig {
+        let mut config = EngineConfig::new(self.resolved_model_dir());
+        config.llama_dir = non_empty_path(&self.llama_dir);
+        config.device = self.device;
+        config.max_tokens = self.max_tokens;
+        config.image_max_tokens = self.image_max_tokens;
+        config.parallel_pages = self.parallel_pages.clamp(1, 2);
+        config.request_timeout = Duration::from_secs(self.timeout_secs.max(1));
+        // Keep the `-c` value consistent with a regular job for `-np 2`.
+        config.context_size = server_tuning(&config).context_size;
+        config
+    }
+
+    /// Drop the current server reference and cancel an in-flight startup. The
+    /// process itself is killed on the last `Arc`/`Drop`; a running job that
+    /// already cloned the handle keeps it alive until that job ends.
+    fn stop_preload_state(&mut self) {
+        if let Some(cancel) = self.preload_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        self.preload_rx = None;
+        self.preloading = false;
+        self.preloaded = None;
+        self.preload_key = None;
+        self.preload_error = None;
+    }
+
+    /// Start, keep or stop the background sidecar according to the toggle and
+    /// the current setup. Called at startup, after setup changes (the key is
+    /// compared every frame) and from the device/quality/parallel controls.
+    fn maybe_start_preload(&mut self) {
+        if !self.preload_allowed() {
+            if self.preloaded.is_some() || self.preloading || self.preload_key.is_some() {
+                self.stop_preload_state();
+            }
+            return;
+        }
+        if !self.preload_model {
+            if self.preloaded.is_some() || self.preloading || self.preload_key.is_some() {
+                self.stop_preload_state();
+                self.log("preload: disabled; releasing the model", false);
+                if !self.running {
+                    self.status = "Предзагрузка выключена.".to_string();
+                }
+            }
+            return;
+        }
+
+        // A dead server must not silence the "model in memory" status. Keep
+        // the key so a repeatedly crashing sidecar is not respawned every frame;
+        // the next job (or a settings change) starts a fresh engine.
+        if let Some(server) = &self.preloaded {
+            if !server.is_alive() {
+                self.preloaded = None;
+                self.preload_error = Some("Движок предзагрузки остановился.".to_string());
+                self.log(
+                    "warning: preloaded engine is no longer running; the next job will start its own",
+                    true,
+                );
+            }
+        }
+
+        let Some(key) = self.preload_key() else {
+            if self.preloaded.is_some() || self.preloading || self.preload_key.is_some() {
+                self.stop_preload_state();
+            }
+            return;
+        };
+
+        if self.preload_key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        // Settings changed while a job is using the old engine: restart after
+        // the job finishes instead of loading a second model into memory.
+        if self.running {
+            return;
+        }
+
+        self.stop_preload_state();
+        self.preload_key = Some(key);
+        self.preload_error = None;
+        let config = self.preload_engine_config();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.preload_cancel = Some(cancel.clone());
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = std::sync::mpsc::channel();
+        self.preload_rx = Some(rx);
+        self.preloading = true;
+        if !self.running {
+            self.status = "Загружаем модель в память…".to_string();
+        }
+        self.log(
+            format!(
+                "preload: starting llama-server for {} ({})",
+                self.resolved_model_dir().display(),
+                self.device.as_str()
+            ),
+            false,
+        );
+        std::thread::spawn(move || {
+            let mut guard = PreloadGuard::new(tx);
+            let mut log = |message: &str| {
+                gui_log::write(format!("preload: {message}"));
+            };
+            let result = OcrServer::start(&config, &cancel, &mut log)
+                .map(Arc::new)
+                .map_err(|error| format!("{error:#}"));
+            guard.finish(result);
+        });
+    }
+
+    /// Drain background preload results. Kept separate from `poll` because the
+    /// preload channel must stay open while jobs/downloads use `self.rx`.
+    fn poll_preload(&mut self) {
+        loop {
+            let received = match self.preload_rx.as_ref() {
+                Some(rx) => rx.try_recv(),
+                None => return,
+            };
+            let message = match received {
+                Ok(message) => message,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.preloading = false;
+                    self.preload_rx = None;
+                    if self.preload_error.is_none() {
+                        self.preload_error =
+                            Some("Поток предзагрузки завершился без результата.".to_string());
+                        self.log(
+                            "warning: preload thread exited without reporting a result",
+                            true,
+                        );
+                    }
+                    break;
+                }
+            };
+            match message {
+                Msg::PreloadDone(Ok(server)) => {
+                    self.preloading = false;
+                    self.preload_rx = None;
+                    self.preload_error = None;
+                    self.preloaded = Some(server);
+                    let text = "Модель в памяти — первый документ начнётся быстрее.";
+                    self.log(text, false);
+                    if !self.running {
+                        self.status = text.to_string();
+                    }
+                }
+                Msg::PreloadDone(Err(error)) => {
+                    self.preloading = false;
+                    self.preload_rx = None;
+                    self.preload_error = Some(error.clone());
+                    self.log(format!("warning: cannot preload model: {error}"), true);
+                    if !self.running {
+                        self.status =
+                            "Предзагрузка не удалась — распознавание запустит движок само."
+                                .to_string();
+                    }
+                }
+                _ => {
+                    // The preload channel only carries PreloadDone.
+                    self.log(
+                        "warning: unexpected background message on the preload channel",
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
     fn resolved_model_dir(&self) -> PathBuf {
         let explicit = non_empty_path(&self.model_dir);
         let env = std::env::var_os(MODEL_ENV);
@@ -601,6 +860,8 @@ impl OcrApp {
             Some("Сначала подготовьте инструменты в карточке выше.")
         } else if self.output_dir.trim().is_empty() {
             Some("Выберите папку для сохранения.")
+        } else if self.preloading && self.preload_error.is_none() {
+            Some("Модель загружается в память…")
         } else {
             None
         }
@@ -614,7 +875,7 @@ impl OcrApp {
     /// is only used as the detail for running/error/notice phases; an idle list
     /// always gets the actionable file hint instead of a leftover sentence.
     fn status_phase(&self) -> StatusPhase {
-        if self.running || self.downloading || self.runtime_downloading {
+        if self.running || self.downloading || self.runtime_downloading || self.preloading {
             StatusPhase::Running
         } else if self.last_error.is_some() {
             StatusPhase::Error
@@ -686,6 +947,7 @@ impl OcrApp {
             parallel_pages: self.parallel_pages,
             request_timeout_secs: self.timeout_secs,
             extract_blocks: self.extract_blocks,
+            preloaded_server: self.preloaded.clone(),
         };
 
         self.running = true;
@@ -1041,6 +1303,10 @@ impl OcrApp {
                     return;
                 }
                 Msg::Runtime(progress) => self.handle_runtime_progress(progress),
+                Msg::PreloadDone(_) => {
+                    // Preload results arrive on the dedicated `preload_rx`
+                    // channel (`poll_preload`), never on the job channel.
+                }
                 Msg::RuntimeDone(result) => {
                     self.runtime_downloading = false;
                     self.runtime_started = None;
@@ -1355,7 +1621,9 @@ impl OcrApp {
 impl eframe::App for OcrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        self.poll_preload();
         self.maybe_refresh_setup();
+        self.maybe_start_preload();
 
         // Accept files dropped onto the window.
         let dropped: Vec<PathBuf> = ctx.input(|input| {
@@ -1389,6 +1657,9 @@ impl eframe::App for OcrApp {
         if self.running || self.downloading || self.runtime_downloading || self.shot.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        if self.preloading {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
     }
 }
 
@@ -1401,6 +1672,16 @@ impl Drop for OcrApp {
         self.cancel.store(true, Ordering::SeqCst);
         self.download_cancel.store(true, Ordering::SeqCst);
         self.runtime_cancel.store(true, Ordering::SeqCst);
+        if let Some(cancel) = self.preload_cancel.take() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        // The preloaded sidecar belongs to this window: kill it now, even if a
+        // job still holds another Arc. The Windows job object is the last-resort
+        // backstop if this process dies abruptly.
+        if let Some(server) = self.preloaded.take() {
+            server.kill();
+        }
+        self.preload_rx = None;
         if let Some(rx) = self.rx.take() {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -1729,7 +2010,8 @@ mod tests {
             | Ok(Msg::Download(_))
             | Ok(Msg::DownloadDone(_))
             | Ok(Msg::Runtime(_))
-            | Ok(Msg::RuntimeDone(_)) => {
+            | Ok(Msg::RuntimeDone(_))
+            | Ok(Msg::PreloadDone(_)) => {
                 panic!("unexpected message")
             }
             Err(error) => panic!("no Done message: {error}"),
@@ -1834,6 +2116,22 @@ mod tests {
                 assert!(message.contains("panicked"), "{message}")
             }
             _ => panic!("no RuntimeDone message"),
+        }
+    }
+
+    #[test]
+    fn preload_guard_reports_a_panicking_worker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = PreloadGuard::new(tx.clone());
+            panic!("boom");
+        }));
+        assert!(result.is_err());
+        match rx.try_recv() {
+            Ok(Msg::PreloadDone(Err(message))) => {
+                assert!(message.contains("panicked"), "{message}")
+            }
+            _ => panic!("no PreloadDone message"),
         }
     }
 
@@ -1964,6 +2262,74 @@ mod tests {
     fn pdf_inputs_are_detected_for_the_pdfium_guard() {
         assert!(is_pdf_input(Path::new("a.PDF")));
         assert!(!is_pdf_input(Path::new("a.png")));
+    }
+
+    #[test]
+    fn preload_key_changes_with_every_engine_setting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = tmp.path().join("runtime");
+        let llama = runtime.join("llama-cpu");
+        std::fs::create_dir_all(&llama).unwrap();
+        let server = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
+        std::fs::write(llama.join(server), b"fake").unwrap();
+        let pdfium = runtime_pdfium_candidate(&runtime);
+        std::fs::create_dir_all(pdfium.parent().unwrap()).unwrap();
+        std::fs::write(&pdfium, b"fake").unwrap();
+
+        let mut app = OcrApp::new();
+        app.model_status = ModelStatus::Ready {
+            dir: tmp.path().to_path_buf(),
+            paths: ocr_core::ModelPaths {
+                dir: tmp.path().to_path_buf(),
+                model: tmp.path().join("model.gguf"),
+                mmproj: tmp.path().join("mmproj.gguf"),
+            },
+            model_bytes: 0,
+            mmproj_bytes: 0,
+        };
+        app.model_dir = tmp.path().display().to_string();
+        app.runtime_dir = runtime.display().to_string();
+        app.llama_dir = runtime.display().to_string();
+        app.pdfium = pdfium.display().to_string();
+        app.runtime = runtime_status(Some(&runtime), Some(&pdfium));
+        assert!(app.setup_complete());
+
+        let base = app.preload_key().expect("ready setup has a preload key");
+        app.device = Device::Cpu;
+        assert_ne!(app.preload_key().as_deref(), Some(base.as_str()));
+        let after_device = app.preload_key().unwrap();
+        app.image_max_tokens = ocr_engine::FAST_IMAGE_MAX_TOKENS;
+        assert_ne!(app.preload_key().as_deref(), Some(after_device.as_str()));
+        let after_quality = app.preload_key().unwrap();
+        app.parallel_pages = 2;
+        assert_ne!(app.preload_key().as_deref(), Some(after_quality.as_str()));
+        let after_parallel = app.preload_key().unwrap();
+        app.llama_dir = tmp.path().join("other-llama").display().to_string();
+        assert_ne!(app.preload_key().as_deref(), Some(after_parallel.as_str()));
+        let after_llama = app.preload_key().unwrap();
+        app.model_dir = tmp.path().join("other-model").display().to_string();
+        assert_ne!(app.preload_key().as_deref(), Some(after_llama.as_str()));
+        let after_model = app.preload_key().unwrap();
+        app.pdfium = tmp.path().join("other-pdfium.dll").display().to_string();
+        assert_ne!(app.preload_key().as_deref(), Some(after_model.as_str()));
+        let after_pdfium = app.preload_key().unwrap();
+        app.timeout_secs += 30;
+        assert_ne!(app.preload_key().as_deref(), Some(after_pdfium.as_str()));
+
+        app.inputs.push(tmp.path().join("scan.pdf"));
+        app.preloading = true;
+        app.preload_error = None;
+        assert_eq!(app.start_blocker(), Some("Модель загружается в память…"));
+        app.preload_error = Some("boom".to_string());
+        assert_eq!(
+            app.start_blocker(),
+            None,
+            "a failed preload must not block Recognize forever"
+        );
     }
 
     #[test]

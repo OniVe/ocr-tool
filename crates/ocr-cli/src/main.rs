@@ -278,6 +278,7 @@ fn run_ocr(args: OcrArgs) -> Result<i32> {
         parallel_pages: args.parallel_pages,
         request_timeout_secs: args.timeout,
         extract_blocks: effective_extract_blocks(args.extract_images, args.extract_blocks),
+        preloaded_server: None,
     };
 
     // Preflight errors are configuration/user errors -> exit 2.

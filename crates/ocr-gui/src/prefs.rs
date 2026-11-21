@@ -16,7 +16,7 @@ use ocr_engine::{FAST_IMAGE_MAX_TOKENS, MAX_PARALLEL_PAGES};
 use serde::{Deserialize, Serialize};
 
 /// Last choices the user made on the main screen.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuiPrefs {
     #[serde(default)]
     pub output_dir: Option<String>,
@@ -42,6 +42,10 @@ pub struct GuiPrefs {
     /// PDF pages in flight: 1 or 2.
     #[serde(default)]
     pub parallel_pages: Option<u32>,
+    /// Keep llama-server loaded between jobs. Missing in an older prefs file
+    /// means `true` (the preferred first-run behaviour).
+    #[serde(default = "default_preload_model")]
+    pub preload_model: bool,
     /// Explicit model folder (advanced); empty means auto-discovery.
     #[serde(default)]
     pub model_dir: String,
@@ -69,6 +73,36 @@ pub struct GuiPrefs {
     /// Advanced request timeout; zero means "not stored yet" (use the default).
     #[serde(default)]
     pub timeout_secs: u64,
+}
+
+fn default_preload_model() -> bool {
+    true
+}
+
+impl Default for GuiPrefs {
+    fn default() -> Self {
+        Self {
+            output_dir: None,
+            format: None,
+            device: None,
+            dpi: None,
+            extract_blocks: None,
+            extract_images: None,
+            fast: None,
+            image_max_tokens: None,
+            parallel_pages: None,
+            preload_model: true,
+            model_dir: String::new(),
+            runtime_dir: String::new(),
+            llama_dir: String::new(),
+            pdfium: String::new(),
+            pages: String::new(),
+            recursive: false,
+            max_pixels: 0,
+            max_tokens: 0,
+            timeout_secs: 0,
+        }
+    }
 }
 
 impl GuiPrefs {
@@ -219,6 +253,7 @@ mod tests {
             fast: Some(true),
             image_max_tokens: Some(2048),
             parallel_pages: Some(2),
+            preload_model: false,
             model_dir: "E:\\модели\\Qwen".to_string(),
             runtime_dir: "D:\\runtime".to_string(),
             llama_dir: "D:\\runtime\\llama".to_string(),
@@ -262,6 +297,10 @@ mod tests {
         assert_eq!(prefs.max_pixels, 0);
         assert_eq!(prefs.max_tokens, 0);
         assert_eq!(prefs.timeout_secs, 0);
+        assert!(
+            prefs.preload_model,
+            "an older prefs file without the field must preload the model"
+        );
         assert_eq!(prefs.max_pixels_or(400_000_000), 400_000_000);
         assert_eq!(prefs.max_tokens_or(4096), 4096);
         assert_eq!(prefs.timeout_secs_or(600), 600);
@@ -332,6 +371,24 @@ mod tests {
             ..GuiPrefs::default()
         };
         assert_eq!(new.extract_blocks(), BlockExtraction::All);
+    }
+
+    #[test]
+    fn preload_defaults_to_on_and_roundtrips_the_off_choice() {
+        assert!(GuiPrefs::default().preload_model);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui-prefs.json");
+        let off = GuiPrefs {
+            preload_model: false,
+            ..GuiPrefs::default()
+        };
+        save_to(&path, &off).unwrap();
+        let loaded = load_from(&path);
+        assert!(!loaded.preload_model);
+        assert_eq!(loaded, off);
+
+        std::fs::write(&path, r#"{"preload_model": true}"#).unwrap();
+        assert!(load_from(&path).preload_model);
     }
 
     #[test]

@@ -316,7 +316,11 @@ if (-not $SkipGui) {
     Write-Host "`n== GUI smoke test (>= 5 s) =="
     $guiLog = Join-Path $OutRoot "gui.log"
     $savedGuiLogEnv = $env:OCR_GUI_LOG
+    $savedNoPreload = $env:OCR_GUI_NO_PRELOAD
     $env:OCR_GUI_LOG = $guiLog
+    # The smoke test only checks that the window stays alive; do not load a
+    # multi-gigabyte model into VRAM during it.
+    $env:OCR_GUI_NO_PRELOAD = "1"
     if (-not (Test-Path $Gui)) {
         Check "GUI binary exists" $false $Gui
     } else {
@@ -389,6 +393,11 @@ if (-not $SkipGui) {
         $env:OCR_GUI_LOG = $savedGuiLogEnv
     } else {
         Remove-Item Env:\OCR_GUI_LOG -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $savedNoPreload) {
+        $env:OCR_GUI_NO_PRELOAD = $savedNoPreload
+    } else {
+        Remove-Item Env:\OCR_GUI_NO_PRELOAD -ErrorAction SilentlyContinue
     }
 }
 

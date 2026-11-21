@@ -794,6 +794,21 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                     ui.label(mono_text("нужна подготовка", 9.0, MUTED));
                                 });
                             }
+                            if app.preloading {
+                                ui.add_space(4.0);
+                                badge(ui, "ЗАГРУЖАЕМ МОДЕЛЬ…", false);
+                            } else if app
+                                .preloaded
+                                .as_ref()
+                                .map(|server| server.is_alive())
+                                .unwrap_or(false)
+                            {
+                                ui.add_space(4.0);
+                                badge(ui, "МОДЕЛЬ В ПАМЯТИ", true);
+                            } else if app.preload_error.is_some() {
+                                ui.add_space(4.0);
+                                badge(ui, "ПРЕДЗАГРУЗКА НЕ УДАЛАСЬ", false);
+                            }
 
                             ui.add_space(10.0);
                             ui.label(pixel_text("СКОРОСТЬ", 8.0, MUTED));
@@ -805,14 +820,37 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                 {
                                     app.image_max_tokens = DEFAULT_IMAGE_MAX_TOKENS;
                                     app.save_prefs();
+                                    app.maybe_start_preload();
                                 }
                                 if segment(ui, "БЫСТРО", !quality, !app.running, 82.0).clicked()
                                     && quality
                                 {
                                     app.image_max_tokens = FAST_IMAGE_MAX_TOKENS;
                                     app.save_prefs();
+                                    app.maybe_start_preload();
                                 }
                             });
+                            ui.add_space(6.0);
+                            let mut preload = app.preload_model;
+                            if check_row(
+                                ui,
+                                &mut preload,
+                                "ПРЕДЗАГРУЗКА МОДЕЛИ",
+                                "Держать модель в памяти между запусками.",
+                            ) {
+                                app.preload_model = preload;
+                                app.save_prefs();
+                                app.maybe_start_preload();
+                                if preload {
+                                    app.log("preload: enabled", false);
+                                }
+                            }
+                            ui.label(mono_text(
+                                "Держать модель в памяти: первый документ быстрее, но занимает \
+                                 ~5 ГБ VRAM/RAM. Отключите, если память нужна другим приложениям.",
+                                9.0,
+                                MUTED,
+                            ));
                             ui.add_space(8.0);
                             if pixel_button(
                                 ui,
@@ -1341,10 +1379,12 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
             if segment(ui, "КАЧЕСТВО", quality, !app.running, 92.0).clicked() && !quality {
                 app.image_max_tokens = DEFAULT_IMAGE_MAX_TOKENS;
                 app.save_prefs();
+                app.maybe_start_preload();
             }
             if segment(ui, "БЫСТРО", !quality, !app.running, 92.0).clicked() && quality {
                 app.image_max_tokens = FAST_IMAGE_MAX_TOKENS;
                 app.save_prefs();
+                app.maybe_start_preload();
             }
         });
         let hint = if app.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS {
@@ -1366,6 +1406,7 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
         ) {
             app.parallel_pages = if parallel { 2 } else { 1 };
             app.save_prefs();
+            app.maybe_start_preload();
         }
         if parallel && app.is_cpu_mode() {
             note(
@@ -1481,6 +1522,29 @@ fn result_idle(app: &mut OcrApp, ui: &mut egui::Ui) {
         9.0,
         MUTED,
     ));
+    if app.preloading {
+        ui.add_space(4.0);
+        ui.label(mono_text("ЗАГРУЖАЕМ МОДЕЛЬ В ПАМЯТЬ…", 9.0, INK));
+    } else if app
+        .preloaded
+        .as_ref()
+        .map(|server| server.is_alive())
+        .unwrap_or(false)
+    {
+        ui.add_space(4.0);
+        ui.label(mono_text(
+            "МОДЕЛЬ В ПАМЯТИ — первый документ быстрее.",
+            9.0,
+            INK,
+        ));
+    } else if app.preload_error.is_some() {
+        ui.add_space(4.0);
+        ui.label(mono_text(
+            "Предзагрузка не удалась. Распознавание запустит движок само.",
+            9.0,
+            MUTED,
+        ));
+    }
     if app.downloading || app.runtime_downloading {
         ui.add_space(8.0);
         ui.label(mono_text(
@@ -1893,6 +1957,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
                         }
                     }
                 });
+            app.maybe_start_preload();
             ui.end_row();
 
             ui.label(mono_text("Блоки", 10.0, MUTED));
@@ -2040,6 +2105,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
     if changed {
         app.refresh_setup();
         app.save_prefs();
+        app.maybe_start_preload();
     }
 }
 
@@ -2644,6 +2710,7 @@ impl OcrApp {
             fast: Some(self.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS),
             image_max_tokens: Some(self.image_max_tokens),
             parallel_pages: Some(self.parallel_pages),
+            preload_model: self.preload_model,
             model_dir: self.model_dir.clone(),
             runtime_dir: self.runtime_dir.clone(),
             llama_dir: self.llama_dir.clone(),
