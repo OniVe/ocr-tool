@@ -43,7 +43,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 840.0])
         .with_min_inner_size([1000.0, 720.0])
-        .with_title("ocr-tool — Распознавание документов");
+        .with_title("ocr-tool — распознавание документов");
     // The window/taskbar icon is separate from the icon embedded into the exe.
     match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
@@ -1539,7 +1539,7 @@ fn friendly_failure(error: &str) -> String {
         }
         FailureKind::Output => "Не могу писать в эту папку. Выберите другую папку.".to_string(),
         FailureKind::Password => {
-            "PDF защищён паролем. Введите пароль в разделе «PDF с паролем?».".to_string()
+            "PDF защищён паролем. Введите пароль в разделе «PDF-ПАРОЛЬ».".to_string()
         }
         FailureKind::Pages => {
             "Не получилось разобрать номера страниц. Укажите их так: 1-5,7 — или \

@@ -578,7 +578,7 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                         ui.vertical(|ui| {
                             ui.label(pixel_text("OCR TOOL", 22.0, INK));
                             ui.label(mono_text(
-                                "LOCAL DOCUMENT RECOGNITION · NO CLOUD",
+                                "ЛОКАЛЬНОЕ РАСПОЗНАВАНИЕ ДОКУМЕНТОВ · БЕЗ ОБЛАКА",
                                 9.0,
                                 MUTED,
                             ));
@@ -592,11 +592,11 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                             }
                             ui.add_space(8.0);
                             ui.label(mono_text(
-                                format!("v{} / LOCAL", env!("CARGO_PKG_VERSION")),
+                                format!("v{} / ЛОКАЛЬНО", env!("CARGO_PKG_VERSION")),
                                 9.0,
                                 MUTED,
                             ));
-                            badge(ui, "LOCAL", true);
+                            badge(ui, "ЛОКАЛЬНО", true);
                         });
                     });
                 });
@@ -621,7 +621,7 @@ fn footer(app: &mut OcrApp, ctx: &egui::Context) {
                         ui.label(mono_bold_text("OCR TOOL", 10.0, WHITE));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(mono_text(
-                                "CTRL+O ADD · CTRL+ENTER RUN · ESC CANCEL",
+                                "CTRL+O ДОБАВИТЬ · CTRL+ENTER ЗАПУСК · ESC ОТМЕНА",
                                 9.0,
                                 WHITE,
                             ));
@@ -658,7 +658,7 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                     Frame::new()
                         .inner_margin(Margin::symmetric(16, 12))
                         .show(ui, |ui| {
-                            ui.label(pixel_text("WORKFLOW", 9.0, MUTED));
+                            ui.label(pixel_text("ЭТАПЫ", 9.0, MUTED));
                             ui.add_space(4.0);
                             let active_step = if app.running
                                 || (app.setup_complete()
@@ -676,13 +676,13 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                 ui,
                                 &mut previous_bottom,
                                 1,
-                                "DOCUMENTS",
+                                "ДОКУМЕНТЫ",
                                 "Добавьте PDF или изображения.",
                                 active_step == 1,
                                 |ui| {
                                     if pixel_button(
                                         ui,
-                                        "ADD FILES",
+                                        "ДОБАВИТЬ ФАЙЛЫ",
                                         ButtonKind::Secondary,
                                         !app.running,
                                     )
@@ -709,13 +709,13 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                 ui,
                                 &mut previous_bottom,
                                 2,
-                                "OUTPUT",
+                                "СОХРАНЕНИЕ",
                                 "Папка, формат, скорость.",
                                 active_step == 2,
                                 |ui| {
                                     if pixel_button(
                                         ui,
-                                        "OUTPUT FOLDER",
+                                        "ПАПКА СОХРАНЕНИЯ",
                                         ButtonKind::Secondary,
                                         !app.running,
                                     )
@@ -735,14 +735,14 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                 ui,
                                 &mut previous_bottom,
                                 3,
-                                "RECOGNIZE",
+                                "РАСПОЗНАТЬ",
                                 "Проверьте настройки и запускайте.",
                                 active_step == 3,
                                 |ui| {
                                     if app.running {
                                         if pixel_button_full(
                                             ui,
-                                            "CANCEL",
+                                            "ОТМЕНА",
                                             ButtonKind::Primary,
                                             !app.cancelling,
                                         )
@@ -785,28 +785,28 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
 
                             if app.setup_complete() {
                                 ui.horizontal(|ui| {
-                                    badge(ui, "READY", true);
+                                    badge(ui, "ГОТОВО", true);
                                     ui.label(mono_text("модель и движок готовы", 9.0, MUTED));
                                 });
                             } else {
                                 ui.horizontal(|ui| {
-                                    badge(ui, "SETUP", false);
+                                    badge(ui, "ПОДГОТОВКА", false);
                                     ui.label(mono_text("нужна подготовка", 9.0, MUTED));
                                 });
                             }
 
                             ui.add_space(10.0);
-                            ui.label(pixel_text("SPEED", 8.0, MUTED));
+                            ui.label(pixel_text("СКОРОСТЬ", 8.0, MUTED));
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
                                 let quality = app.image_max_tokens >= DEFAULT_IMAGE_MAX_TOKENS;
-                                if segment(ui, "QUALITY", quality, !app.running, 82.0).clicked()
+                                if segment(ui, "КАЧЕСТВО", quality, !app.running, 82.0).clicked()
                                     && !quality
                                 {
                                     app.image_max_tokens = DEFAULT_IMAGE_MAX_TOKENS;
                                     app.save_prefs();
                                 }
-                                if segment(ui, "FAST", !quality, !app.running, 82.0).clicked()
+                                if segment(ui, "БЫСТРО", !quality, !app.running, 82.0).clicked()
                                     && quality
                                 {
                                     app.image_max_tokens = FAST_IMAGE_MAX_TOKENS;
@@ -814,8 +814,13 @@ fn left_rail(app: &mut OcrApp, ctx: &egui::Context) {
                                 }
                             });
                             ui.add_space(8.0);
-                            if pixel_button(ui, "ADVANCED", ButtonKind::Secondary, !app.running)
-                                .clicked()
+                            if pixel_button(
+                                ui,
+                                "ДОПОЛНИТЕЛЬНО",
+                                ButtonKind::Secondary,
+                                !app.running,
+                            )
+                            .clicked()
                             {
                                 app.show_advanced = true;
                             }
@@ -883,7 +888,7 @@ fn step_block(
 // ---------------------------------------------------------------------------
 
 fn setup_window(app: &mut OcrApp, ui: &mut egui::Ui) {
-    pixel_window(ui, "setup", |ui| {
+    pixel_window(ui, "ПОДГОТОВКА", |ui| {
         ui.label(pixel_text("ПЕРВАЯ ПОДГОТОВКА", 10.0, INK));
         ui.label(mono_text(
             "Это разовая загрузка. Документы не отправляются в интернет.",
@@ -907,15 +912,15 @@ fn setup_model_row(app: &mut OcrApp, ui: &mut egui::Ui) {
     let busy = app.downloading || app.runtime_downloading || app.running;
 
     ui.horizontal(|ui| {
-        badge(ui, "MODEL", true);
+        badge(ui, "МОДЕЛЬ", true);
         ui.label(mono_bold_text("Модель распознавания", 12.0, INK));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ready {
-                badge(ui, "READY", true);
+                badge(ui, "ГОТОВО", true);
             } else if incomplete {
-                badge(ui, "INCOMPLETE", false);
+                badge(ui, "НЕПОЛНАЯ", false);
             } else {
-                badge(ui, "MISSING", false);
+                badge(ui, "НЕТ", false);
             }
         });
     });
@@ -999,15 +1004,15 @@ fn setup_runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
         .unwrap_or_else(|| "~69 МБ".to_string());
 
     ui.horizontal(|ui| {
-        badge(ui, "RUNTIME", true);
+        badge(ui, "ДВИЖОК", true);
         ui.label(mono_bold_text("Движок и просмотр PDF", 12.0, INK));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ready {
-                badge(ui, "READY", true);
+                badge(ui, "ГОТОВО", true);
             } else if llama_ready {
-                badge(ui, "NO PDFIUM", false);
+                badge(ui, "НЕТ PDFIUM", false);
             } else {
-                badge(ui, "MISSING", false);
+                badge(ui, "НЕТ", false);
             }
         });
     });
@@ -1084,7 +1089,7 @@ fn setup_runtime_row(app: &mut OcrApp, ui: &mut egui::Ui) {
 }
 
 fn documents_window(app: &mut OcrApp, ui: &mut egui::Ui) {
-    pixel_window(ui, "documents", |ui| {
+    pixel_window(ui, "ДОКУМЕНТЫ", |ui| {
         ui.horizontal(|ui| {
             ui.label(mono_text("Добавьте PDF или изображения.", 11.0, INK));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1093,7 +1098,7 @@ fn documents_window(app: &mut OcrApp, ui: &mut egui::Ui) {
                     &format!(
                         "{} {}",
                         app.inputs.len(),
-                        plural_ru(app.inputs.len(), "FILE", "FILES", "FILES")
+                        plural_ru(app.inputs.len(), "ФАЙЛ", "ФАЙЛА", "ФАЙЛОВ")
                     ),
                     app.inputs.len() > 0,
                 );
@@ -1105,17 +1110,18 @@ fn documents_window(app: &mut OcrApp, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let can_edit = !app.running;
             ui.spacing_mut().item_spacing.x = 6.0;
-            if pixel_button(ui, "ADD FILES", ButtonKind::Primary, can_edit)
+            if pixel_button(ui, "ДОБАВИТЬ ФАЙЛЫ", ButtonKind::Primary, can_edit)
                 .on_hover_text("Ctrl+O")
                 .clicked()
             {
                 app.pick_files();
             }
-            if pixel_button(ui, "ADD FOLDER", ButtonKind::Secondary, can_edit).clicked() {
+            if pixel_button(ui, "ДОБАВИТЬ ПАПКУ", ButtonKind::Secondary, can_edit).clicked()
+            {
                 app.pick_folder();
             }
             if !app.inputs.is_empty()
-                && pixel_button(ui, "CLEAR", ButtonKind::Secondary, can_edit).clicked()
+                && pixel_button(ui, "ОЧИСТИТЬ", ButtonKind::Secondary, can_edit).clicked()
             {
                 app.inputs.clear();
                 app.status = "Список очищен. Добавьте файлы, чтобы начать.".to_string();
@@ -1269,7 +1275,7 @@ fn drop_zone(app: &mut OcrApp, ui: &mut egui::Ui) {
 }
 
 fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
-    pixel_window(ui, "output", |ui| {
+    pixel_window(ui, "СОХРАНЕНИЕ", |ui| {
         ui.label(pixel_text("ПАПКА", 8.0, MUTED));
         ui.add_space(2.0);
         let folder = if app.output_dir.trim().is_empty() {
@@ -1313,8 +1319,8 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
                 (OutputFormat::Md, "MD"),
                 (OutputFormat::Html, "HTML"),
                 (OutputFormat::Json, "JSON"),
-                (OutputFormat::Both, "BOTH"),
-                (OutputFormat::All, "ALL"),
+                (OutputFormat::Both, "ОБА"),
+                (OutputFormat::All, "ВСЁ"),
             ] {
                 if segment(ui, label, app.format == value, !app.running, 58.0).clicked()
                     && app.format != value
@@ -1332,11 +1338,11 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let quality = app.image_max_tokens >= DEFAULT_IMAGE_MAX_TOKENS;
-            if segment(ui, "QUALITY", quality, !app.running, 92.0).clicked() && !quality {
+            if segment(ui, "КАЧЕСТВО", quality, !app.running, 92.0).clicked() && !quality {
                 app.image_max_tokens = DEFAULT_IMAGE_MAX_TOKENS;
                 app.save_prefs();
             }
-            if segment(ui, "FAST", !quality, !app.running, 92.0).clicked() && quality {
+            if segment(ui, "БЫСТРО", !quality, !app.running, 92.0).clicked() && quality {
                 app.image_max_tokens = FAST_IMAGE_MAX_TOKENS;
                 app.save_prefs();
             }
@@ -1354,7 +1360,7 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
         if check_row(
             ui,
             &mut parallel,
-            "2 PAGES AT ONCE",
+            "2 СТРАНИЦЫ ОДНОВРЕМЕННО",
             "llama-server запускается с -np 2 и контекстом 20000. Ускоряет пакет страниц, \
              но не одну страницу; нужно около 5 ГБ VRAM.",
         ) {
@@ -1370,7 +1376,7 @@ fn output_window(app: &mut OcrApp, ui: &mut egui::Ui) {
         }
 
         ui.add_space(8.0);
-        let _ = toggle_button(ui, &mut app.show_password, "PDF PASSWORD");
+        let _ = toggle_button(ui, &mut app.show_password, "PDF-ПАРОЛЬ");
         if app.show_password {
             ui.label(mono_text(
                 "Только для защищённых PDF. Пароль не сохраняется и не попадает в журнал.",
@@ -1410,7 +1416,7 @@ fn result_panel(app: &mut OcrApp, ctx: &egui::Context) {
                         .inner_margin(0)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            window_title_bar(ui, "result", false);
+                            window_title_bar(ui, "РЕЗУЛЬТАТ", false);
                             egui::ScrollArea::vertical()
                                 .id_salt("result-scroll")
                                 .auto_shrink([false, false])
@@ -1462,14 +1468,14 @@ fn result_idle(app: &mut OcrApp, ui: &mut egui::Ui) {
         format!(
             "РЕЖИМ: {} · {}",
             if app.image_max_tokens >= DEFAULT_IMAGE_MAX_TOKENS {
-                "QUALITY"
+                "КАЧЕСТВО"
             } else {
-                "FAST"
+                "БЫСТРО"
             },
             if app.parallel_pages > 1 {
-                "2 PAGES"
+                "2 СТРАНИЦЫ"
             } else {
-                "1 PAGE"
+                "1 СТРАНИЦА"
             }
         ),
         9.0,
@@ -1478,7 +1484,7 @@ fn result_idle(app: &mut OcrApp, ui: &mut egui::Ui) {
     if app.downloading || app.runtime_downloading {
         ui.add_space(8.0);
         ui.label(mono_text(
-            "Идёт загрузка. Прогресс — в окне setup.",
+            "Идёт загрузка. Прогресс — в окне подготовки.",
             9.5,
             INK,
         ));
@@ -1517,7 +1523,7 @@ fn result_running(app: &mut OcrApp, ui: &mut egui::Ui) {
         );
     }
     ui.add_space(4.0);
-    if mono_button(ui, "CANCEL", ButtonKind::Primary, !app.cancelling).clicked() {
+    if mono_button(ui, "ОТМЕНА", ButtonKind::Primary, !app.cancelling).clicked() {
         app.cancel_job();
     }
     if app.cancelling {
@@ -1543,11 +1549,11 @@ fn result_done(app: &mut OcrApp, ui: &mut egui::Ui) {
     badge(
         ui,
         if report.cancelled {
-            "STOPPED"
+            "ОСТАНОВЛЕНО"
         } else if partial {
-            "PARTIAL"
+            "ЧАСТИЧНО"
         } else {
-            "READY"
+            "ГОТОВО"
         },
         true,
     );
@@ -1610,20 +1616,20 @@ fn result_done(app: &mut OcrApp, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if pixel_button(ui, "OPEN FOLDER", ButtonKind::Primary, true).clicked() {
+        if pixel_button(ui, "ОТКРЫТЬ ПАПКУ", ButtonKind::Primary, true).clicked() {
             app.open_folder_path(std::path::PathBuf::from(&report.output_dir));
         }
         if let Some(html) = html {
-            if pixel_button(ui, "OPEN HTML", ButtonKind::Secondary, true).clicked() {
+            if pixel_button(ui, "ОТКРЫТЬ HTML", ButtonKind::Secondary, true).clicked() {
                 app.open_path(&html);
             }
         }
         if let Some(json) = json {
-            if pixel_button(ui, "OPEN JSON", ButtonKind::Secondary, true).clicked() {
+            if pixel_button(ui, "ОТКРЫТЬ JSON", ButtonKind::Secondary, true).clicked() {
                 app.open_path(&json);
             }
         }
-        if pixel_button(ui, "AGAIN", ButtonKind::Secondary, true).clicked() {
+        if pixel_button(ui, "ЕЩЁ РАЗ", ButtonKind::Secondary, true).clicked() {
             app.reset_for_new_batch();
         }
     });
@@ -1647,7 +1653,7 @@ fn result_error(app: &mut OcrApp, ui: &mut egui::Ui) {
         return;
     };
     let kind = app.last_error_kind;
-    badge(ui, "ERROR", true);
+    badge(ui, "ОШИБКА", true);
     ui.add_space(4.0);
     ui.label(pixel_text("НЕ ПОЛУЧИЛОСЬ", 10.0, INK));
     ui.add_space(4.0);
@@ -1731,7 +1737,7 @@ fn result_error(app: &mut OcrApp, ui: &mut egui::Ui) {
 }
 
 fn details_block(app: &mut OcrApp, ui: &mut egui::Ui, height: f32, id_salt: &str) {
-    toggle_button(ui, &mut app.show_details, "DETAILS");
+    toggle_button(ui, &mut app.show_details, "ПОДРОБНЕЕ");
     if app.show_details {
         ui.add_space(4.0);
         job_log_header(app, ui);
@@ -1757,7 +1763,7 @@ fn advanced_window(app: &mut OcrApp, ctx: &egui::Context) {
         .frame(window_frame())
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
-            if window_title_bar(ui, "advanced", true) {
+            if window_title_bar(ui, "ДОПОЛНИТЕЛЬНО", true) {
                 close = true;
             }
             egui::ScrollArea::vertical()
@@ -1798,7 +1804,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
         .num_columns(2)
         .spacing([12.0, 8.0])
         .show(ui, |ui| {
-            ui.label(mono_text("Model dir", 10.0, MUTED));
+            ui.label(mono_text("ПАПКА МОДЕЛИ", 10.0, MUTED));
             ui.horizontal(|ui| {
                 if ui
                     .add(
@@ -1816,7 +1822,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             });
             ui.end_row();
 
-            ui.label(mono_text("Runtime dir", 10.0, MUTED));
+            ui.label(mono_text("ПАПКА ДВИЖКА", 10.0, MUTED));
             ui.horizontal(|ui| {
                 if ui
                     .add(
@@ -1937,7 +1943,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             );
             ui.end_row();
 
-            ui.label(mono_text("Max pixels", 10.0, MUTED));
+            ui.label(mono_text("МАКС. ПИКСЕЛЕЙ", 10.0, MUTED));
             ui.add(
                 egui::DragValue::new(&mut app.max_pixels)
                     .range(1_000_000..=400_000_000)
@@ -1945,7 +1951,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             );
             ui.end_row();
 
-            ui.label(mono_text("Max tokens", 10.0, MUTED));
+            ui.label(mono_text("МАКС. ТОКЕНОВ", 10.0, MUTED));
             ui.add(
                 egui::DragValue::new(&mut app.max_tokens)
                     .range(128..=32_768)
@@ -1953,7 +1959,7 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             );
             ui.end_row();
 
-            ui.label(mono_text("Timeout, с", 10.0, MUTED));
+            ui.label(mono_text("ТАЙМАУТ, С", 10.0, MUTED));
             ui.add(
                 egui::DragValue::new(&mut app.timeout_secs)
                     .range(30..=7200)
@@ -2027,7 +2033,7 @@ fn help_window(app: &mut OcrApp, ctx: &egui::Context) {
         .frame(window_frame())
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
-            if window_title_bar(ui, "help", true) {
+            if window_title_bar(ui, "СПРАВКА", true) {
                 close = true;
             }
             Frame::new()

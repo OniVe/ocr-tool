@@ -4,6 +4,9 @@ Captured from the Linux build under headless Xvfb (llvmpipe) with the in-app
 egui screenshot harness; the host GUI was not started.
 
 - Window: 1180×840 (default); `08-min-1000x720.png` is the minimum size.
+- All visible labels are Russian. Brand and technical names stay as-is:
+  `OCR TOOL`, `PDF/PNG/JPEG/TIFF/WebP/BMP`, `HTML/JSON/MD`, `DPI`, `PDFium`,
+  `llama-server`, `CTRL/ESC` and the raw log.
 - Demo data only: `/home/onive/demo/...` paths, fake PDF/PNG files, a sparse
   pinned-size model pair and a stub runtime. No recognition was run.
 - `raw` states use `OCR_GUI_DEMO_STATE=done|running|error` (screenshot-only
@@ -23,6 +26,7 @@ OCR_GUI_SHOT=/tmp/shot.png OCR_GUI_SHOT_DELAY_MS=2500
 Command shape:
 
 ```bash
+cd /home/onive/demo
 xvfb-run -a -s "-screen 0 1400x900x24" \
   env LIBGL_ALWAYS_SOFTWARE=1 ... ./ocr-tool-gui
 ```
