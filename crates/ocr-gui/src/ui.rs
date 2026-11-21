@@ -240,22 +240,36 @@ fn button(
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let hovered = enabled && response.hovered();
     let pressed = enabled && response.is_pointer_button_down_on();
+    // Short state transitions without moving the layout. Disabled controls keep
+    // their flat look: no animation, no cursor.
+    let hover_t = if enabled {
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("hover"), hovered, 0.10)
+    } else {
+        0.0
+    };
+    let press_t = if enabled {
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("press"), pressed, 0.04)
+    } else {
+        0.0
+    };
+    let (normal_fill, normal_fg, hover_fill, hover_fg) = match kind {
+        ButtonKind::Primary => (INK, WHITE, PANEL, INK),
+        ButtonKind::Secondary => (PANEL, INK, INK, WHITE),
+    };
     let (fill, fg) = if !enabled {
         (DISABLED, MUTED)
-    } else if pressed {
-        (GREY, INK)
-    } else if hovered {
-        match kind {
-            ButtonKind::Primary => (PANEL, INK),
-            ButtonKind::Secondary => (INK, WHITE),
-        }
     } else {
-        match kind {
-            ButtonKind::Primary => (INK, WHITE),
-            ButtonKind::Secondary => (PANEL, INK),
-        }
+        let fill = normal_fill
+            .lerp_to_gamma(hover_fill, hover_t)
+            .lerp_to_gamma(GREY, press_t);
+        let hover_fg = if hover_t >= 0.5 { hover_fg } else { normal_fg };
+        let fg = if press_t >= 0.5 { INK } else { hover_fg };
+        (fill, fg)
     };
     let border_color = if enabled { INK } else { GREY };
+    let face = rect.shrink(1.0 * press_t);
     ui.painter().rect(
         rect,
         CornerRadius::ZERO,
@@ -263,7 +277,7 @@ fn button(
         Stroke::new(BORDER, border_color),
         StrokeKind::Inside,
     );
-    let pos = rect.center() - galley.size() * 0.5;
+    let pos = face.center() - galley.size() * 0.5;
     ui.painter().galley(pos, galley, fg);
     if enabled {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -397,8 +411,20 @@ fn check_row(ui: &mut egui::Ui, checked: &mut bool, label: &str, hint: &str) -> 
             *checked = !*checked;
             toggled = true;
         }
-        let fill = if *checked { INK } else { PANEL };
+        let hovered = response.hovered() || label_response.hovered();
+        let pressed =
+            response.is_pointer_button_down_on() || label_response.is_pointer_button_down_on();
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("hover"), hovered, 0.10);
+        let press_t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("press"), pressed, 0.04);
+        let normal = if *checked { INK } else { PANEL };
+        let hover = if *checked { MUTED } else { DISABLED };
+        let fill = normal.lerp_to_gamma(hover, hover_t);
         let fg = if *checked { WHITE } else { INK };
+        let face = rect.shrink(1.0 * press_t);
         ui.painter().rect(
             rect,
             CornerRadius::ZERO,
@@ -408,7 +434,7 @@ fn check_row(ui: &mut egui::Ui, checked: &mut bool, label: &str, hint: &str) -> 
         );
         if *checked {
             ui.painter().text(
-                rect.center(),
+                face.center(),
                 Align2::CENTER_CENTER,
                 "X",
                 FontId::new(9.0, pixel_family()),
@@ -467,19 +493,35 @@ fn window_title_bar(ui: &mut egui::Ui, title: &str, closable: bool) -> bool {
             Sense::click(),
         );
         let hovered = response.hovered();
+        let pressed = response.is_pointer_button_down_on();
+        let hover_t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("hover"), hovered, 0.10);
+        let press_t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("press"), pressed, 0.04);
+        let fill = PANEL
+            .lerp_to_gamma(INK, hover_t)
+            .lerp_to_gamma(GREY, press_t);
+        let fg = if press_t >= 0.5 || hover_t < 0.5 {
+            INK
+        } else {
+            WHITE
+        };
+        let face = close_rect.shrink(1.0 * press_t);
         ui.painter().rect(
             close_rect,
             CornerRadius::ZERO,
-            if hovered { INK } else { PANEL },
+            fill,
             Stroke::new(BORDER, INK),
             StrokeKind::Inside,
         );
         ui.painter().text(
-            close_rect.center(),
+            face.center(),
             Align2::CENTER_CENTER,
             "×",
             FontId::new(10.0, pixel_family()),
-            if hovered { WHITE } else { INK },
+            fg,
         );
         close = response.clicked();
     }
@@ -539,7 +581,7 @@ pub fn draw(app: &mut OcrApp, ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Light);
     apply_style(ctx);
 
-    header(app, ctx);
+    header(&mut app.show_help, ctx);
     footer(app, ctx);
     left_rail(app, ctx);
     result_panel(app, ctx);
@@ -576,7 +618,7 @@ pub fn draw(app: &mut OcrApp, ctx: &egui::Context) {
     frameless_resize(ctx);
 }
 
-fn header(app: &mut OcrApp, ctx: &egui::Context) {
+fn header(show_help: &mut bool, ctx: &egui::Context) {
     let maximized = ctx
         .input(|input| input.viewport().maximized)
         .unwrap_or(false);
@@ -633,7 +675,7 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                             let help =
                                 small_pixel_button(ui, "?", true).on_hover_text("Как это работает");
                             if help.clicked() {
-                                app.show_help = !app.show_help;
+                                *show_help = !*show_help;
                             }
                             control_rects.push(help.rect);
                             ui.add_space(8.0);
@@ -698,13 +740,21 @@ fn window_control(ui: &mut egui::Ui, glyph: WindowGlyph, tooltip: &str) -> egui:
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(WINDOW_CONTROL), Sense::click());
     let hovered = response.hovered();
     let pressed = response.is_pointer_button_down_on();
-    let (fill, fg) = if pressed {
-        (GREY, INK)
-    } else if hovered {
-        (INK, WHITE)
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("hover"), hovered, 0.10);
+    let press_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("press"), pressed, 0.04);
+    let fill = PANEL
+        .lerp_to_gamma(INK, hover_t)
+        .lerp_to_gamma(GREY, press_t);
+    let fg = if press_t >= 0.5 || hover_t < 0.5 {
+        INK
     } else {
-        (PANEL, INK)
+        WHITE
     };
+    let face = rect.shrink(1.0 * press_t);
     ui.painter().rect(
         rect,
         CornerRadius::ZERO,
@@ -712,7 +762,7 @@ fn window_control(ui: &mut egui::Ui, glyph: WindowGlyph, tooltip: &str) -> egui:
         Stroke::new(BORDER, INK),
         StrokeKind::Inside,
     );
-    let center = rect.center();
+    let center = face.center();
     match glyph {
         WindowGlyph::Minimize => {
             ui.painter().rect_filled(
@@ -837,9 +887,17 @@ fn frameless_resize(ctx: &egui::Context) {
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .interactable(true)
+        // Avoid the default first-frame 600×400 area background: start at zero
+        // so the only foreground widgets are the eight edge strips.
+        .default_size(Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_clip_rect(screen);
-            ui.allocate_space(screen.size());
+            // Do NOT allocate the full screen here. An interactive `Area`
+            // registers its own background widget over `state.rect()`; a
+            // full-screen one sits in a higher layer and egui 0.31's hit test
+            // (`hidden` pass in hit_test.rs) then discards every panel, header
+            // and button underneath it as "hidden". Only the eight thin edge
+            // widgets exist; the centre stays transparent to input.
             for (index, (direction, rect, cursor)) in directions.into_iter().enumerate() {
                 let response = ui.interact(
                     rect,
@@ -1504,7 +1562,10 @@ fn drop_zone(app: &mut OcrApp, ui: &mut egui::Ui) {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let hovered = response.hovered() && !app.running;
-    let fill = if hovered { CREAM } else { PANEL };
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("hover"), hovered, 0.10);
+    let fill = PANEL.lerp_to_gamma(CREAM, hover_t);
     ui.painter().rect(
         rect,
         CornerRadius::ZERO,
@@ -1513,7 +1574,7 @@ fn drop_zone(app: &mut OcrApp, ui: &mut egui::Ui) {
         StrokeKind::Inside,
     );
     // Corner ticks keep the drop area visibly a target without rounded chrome.
-    let tick = 10.0;
+    let tick = 10.0 + 4.0 * hover_t;
     for corner in [
         (rect.left_top(), Vec2::new(tick, 0.0), Vec2::new(0.0, tick)),
         (
@@ -3158,5 +3219,149 @@ mod tests {
             "Только рисунки"
         );
         assert_eq!(extract_blocks_label(BlockExtraction::All), "Все блоки");
+    }
+
+    // ------------------------------------------------------------------
+    // Input routing for the frameless window
+    // ------------------------------------------------------------------
+
+    const TEST_SCREEN: Vec2 = Vec2::new(1180.0, 840.0);
+
+    fn test_raw(time: f64, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, TEST_SCREEN)),
+            time: Some(time),
+            predicted_dt: 1.0 / 60.0,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn pointer_moved(pos: Pos2) -> egui::Event {
+        egui::Event::PointerMoved(pos)
+    }
+
+    fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn viewport_commands(output: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default()
+    }
+
+    fn pixel_test_context() -> egui::Context {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // `set_fonts` lands at the start of the next pass; an empty warm-up
+        // frame binds the pixel family before the header asks for it.
+        let _ = ctx.run(test_raw(0.0, Vec::new()), |_| {});
+        ctx
+    }
+
+    /// The old full-screen `allocate_space` inside the foreground Area made
+    /// egui's hidden-widget pass drop every lower-layer widget, so this click
+    /// never arrived. It must keep arriving.
+    #[test]
+    fn frameless_resize_overlay_does_not_swallow_buttons() {
+        let ctx = egui::Context::default();
+        let button_rect = Rect::from_min_size(Pos2::new(200.0, 200.0), Vec2::new(160.0, 48.0));
+        let center = button_rect.center();
+        let mut clicked = false;
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            ctx.run(test_raw(time, events), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    clicked |= ui.put(button_rect, egui::Button::new("test")).clicked();
+                });
+                frameless_resize(ctx);
+            });
+        };
+        frame(0.0, vec![pointer_moved(center)]);
+        frame(0.05, vec![pointer_moved(center)]);
+        frame(0.10, vec![pointer_button(center, true)]);
+        frame(0.15, vec![pointer_button(center, false)]);
+        assert!(clicked, "the foreground resize strips must not hide the UI");
+    }
+
+    #[test]
+    fn frameless_edge_requests_resize_and_center_does_not() {
+        let ctx = egui::Context::default();
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            ctx.run(test_raw(time, events), |ctx| {
+                egui::CentralPanel::default().show(ctx, |_| {});
+                frameless_resize(ctx);
+            })
+        };
+
+        let edge = Pos2::new(2.0, TEST_SCREEN.y / 2.0);
+        frame(0.0, vec![pointer_moved(edge)]);
+        frame(0.05, vec![pointer_moved(edge)]);
+        let pressed = frame(0.10, vec![pointer_button(edge, true)]);
+        assert!(
+            viewport_commands(&pressed).contains(&egui::ViewportCommand::BeginResize(
+                egui::ResizeDirection::West
+            )),
+            "pressing the left edge must start a west resize"
+        );
+
+        frame(0.15, vec![pointer_button(edge, false)]);
+        let center = Pos2::new(TEST_SCREEN.x / 2.0, TEST_SCREEN.y / 2.0);
+        frame(0.20, vec![pointer_moved(center)]);
+        let center_press = frame(0.25, vec![pointer_button(center, true)]);
+        assert!(
+            !viewport_commands(&center_press)
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::BeginResize(_))),
+            "the centre of the window must stay free for the UI"
+        );
+    }
+
+    #[test]
+    fn title_bar_drag_from_empty_space_requests_start_drag() {
+        let ctx = pixel_test_context();
+        let mut show_help = false;
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            ctx.run(test_raw(time, events), |ctx| header(&mut show_help, ctx))
+        };
+
+        let empty = Pos2::new(500.0, 40.0);
+        frame(0.0, vec![pointer_moved(empty)]);
+        frame(0.05, vec![pointer_button(empty, true)]);
+        let dragged = frame(0.10, vec![pointer_moved(Pos2::new(560.0, 40.0))]);
+        assert!(
+            viewport_commands(&dragged).contains(&egui::ViewportCommand::StartDrag),
+            "dragging the empty title-bar space must move the window"
+        );
+    }
+
+    #[test]
+    fn title_bar_close_is_clickable_under_frameless_overlay() {
+        let ctx = pixel_test_context();
+        let mut show_help = false;
+        let mut frame = |time: f64, events: Vec<egui::Event>| {
+            ctx.run(test_raw(time, events), |ctx| {
+                header(&mut show_help, ctx);
+                frameless_resize(ctx);
+            })
+        };
+
+        // Right margin 20, 30 px controls; the row is vertically centred in
+        // the 78 px title bar with a 10 px inner margin.
+        let close = Pos2::new(TEST_SCREEN.x - 20.0 - WINDOW_CONTROL / 2.0, 10.0 + 29.0);
+        frame(0.0, vec![pointer_moved(close)]);
+        frame(0.05, vec![pointer_button(close, true)]);
+        let released = frame(0.10, vec![pointer_button(close, false)]);
+        assert!(
+            viewport_commands(&released).contains(&egui::ViewportCommand::Close),
+            "the window close control must receive its click"
+        );
     }
 }
