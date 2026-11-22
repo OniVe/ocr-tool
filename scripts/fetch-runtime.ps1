@@ -96,7 +96,15 @@ function Expand-Package {
     if ($Archive.EndsWith(".zip")) {
         Expand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force
     } else {
-        & tar -xzf $Archive -C $Destination
+        # Prefer the Windows system bsdtar: a MSYS/Git-Bash tar earlier in PATH
+        # misreads drive-letter paths ("E:\...") as remote hosts.
+        $systemTar = $null
+        if ($env:SystemRoot) { $systemTar = Join-Path $env:SystemRoot "System32\tar.exe" }
+        if ($systemTar -and (Test-Path $systemTar)) {
+            & $systemTar -xzf $Archive -C $Destination
+        } else {
+            & tar -xzf $Archive -C $Destination
+        }
         if ($LASTEXITCODE -ne 0) { throw "tar failed for $Archive" }
     }
 }
