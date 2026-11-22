@@ -22,7 +22,7 @@
     <br />
     PDFium renders pages, a local llama.cpp server runs Chandra OCR 2, and the result is Markdown, HTML and JSON.
     <br /><br />
-    <strong>English</strong> · <a href="README.ru.md">Русский</a>
+    <strong>English</strong> · <a href="README.ru.md">Russian</a>
     <br /><br />
     <a href="#getting-started">Quick Start</a>
     ·
@@ -161,29 +161,28 @@ download it explicitly on request.
 2. Unpack it anywhere — there is no installer and no admin rights are needed.
 3. Run `ocr-tool-gui.exe` (Windows) or the GUI binary from the unpacked folder.
 
-On first launch the GUI shows one **ПОДГОТОВКА** panel with two independent
-rows:
+On first launch the GUI shows one **SETUP** panel with two independent rows:
 
-1. **СКАЧАТЬ МОДЕЛЬ (~3,4 ГБ)** — the pinned Chandra Q4_K_M + mmproj pair,
+1. **DOWNLOAD MODEL (~3.4 GB)** — the pinned Chandra Q4_K_M + mmproj pair,
    resumable and SHA-256 verified, into the app-data model folder (or a folder
-   chosen with **ПАПКА МОДЕЛИ**).
-2. **СКАЧАТЬ ДВИЖОК (~70 МБ)** — llama-vulkan, llama-cpu and PDFium into the
+   chosen with **MODEL FOLDER**).
+2. **DOWNLOAD ENGINE (~70 MB)** — llama-vulkan, llama-cpu and PDFium into the
    editable engine folder (defaults to
    `%LOCALAPPDATA%\ocr-tool\runtime\windows-x64`). The sizes are per platform
    (~25 MB on macOS).
 
 The release archive already contains `runtime/`; the GUI downloads the engine
 only if it is missing — for example after a source build or if the folder was
-deleted. The model row marks its state `НЕТ` or `НЕПОЛНАЯ`. Both downloads have
-progress and cancel; **РАСПОЗНАТЬ** and the other download button stay disabled
-while either is running. Downloads resume from `.part` files and recognise an
-already present installation, so nothing is fetched twice. When model files
-exist but have the wrong size, **ЗАМЕНИТЬ** (with a confirmation step) deletes
-them, including `.part` remainders, and fetches the pinned pair again; a ready
-runtime gets **ПЕРЕУСТАНОВИТЬ**. A missing runtime is shown as a clear setup
-state, not as a raw `os error 3` in the main status. To keep everything in one
-place, choose both folders under the same parent with **ПАПКА МОДЕЛИ** /
-**ПАПКА ДВИЖКА**.
+deleted. The model row marks its state `MISSING` or `INCOMPLETE`. Both
+downloads have progress and cancel; **RECOGNIZE** and the other download
+button stay disabled while either is running. Downloads resume from `.part`
+files and recognise an already present installation, so nothing is fetched
+twice. When model files exist but have the wrong size, **REPLACE** (with a
+confirmation step) deletes them, including `.part` remainders, and fetches the
+pinned pair again; a ready runtime gets **REINSTALL**. A missing runtime is
+shown as a clear setup state, not as a raw `os error 3` in the main status. To
+keep everything in one place, choose both folders under the same parent with
+**MODEL FOLDER** / **ENGINE FOLDER**.
 
 Recognition then runs locally, with no CLI and no further network access.
 
@@ -231,28 +230,28 @@ file, for example `C:\docs\document.pdf` (Windows) or `path/to/document.pdf`
 Run `ocr-tool-gui.exe` (release) or `cargo run --release -p ocr-gui` from a
 source checkout; no CLI or environment variable is required.
 
-- **Add files.** **ДОБАВИТЬ ФАЙЛЫ** opens a file picker, **ДОБАВИТЬ ПАПКУ**
+- **Add files.** **ADD FILES** opens a file picker, **ADD FOLDER**
   adds a folder, and drag and drop works too. Directories are scanned one level
   deep unless recursion is enabled.
-- **Job settings.** Output folder (**ПАПКА СОХРАНЕНИЯ**), format (`MD`, `HTML`,
-  `JSON`, `ОБА`, `ВСЁ`), device, DPI, page range, PDF password (masked field),
+- **Job settings.** Output folder (**OUTPUT FOLDER**), format (`MD`, `HTML`,
+  `JSON`, `BOTH`, `ALL`), device, DPI, page range, PDF password (masked field),
   recurse toggle and **Block extraction** (off / images only / all blocks).
-- **Speed.** The **СКОРОСТЬ** card selects **КАЧЕСТВО** (4096 image tokens) or
-  **БЫСТРО** (2048; ~15% faster, table rows may shift), the **2 pages at once
-  (PDF; GPU)** option, and **ПРЕДЗАГРУЗКА МОДЕЛИ**.
+- **Speed.** The **SPEED** card selects **QUALITY** (4096 image tokens) or
+  **FAST** (2048; ~15% faster, table rows may shift), the **2 pages at once
+  (PDF; GPU)** option, and **MODEL PRELOAD**.
 - **Preload.** On by default: after setup the GUI starts `llama-server` and
   keeps the model in memory, so the first document skips engine startup. The
-  same server is reused across jobs; statuses are `ЗАГРУЖАЕМ МОДЕЛЬ…` and
-  `МОДЕЛЬ В ПАМЯТИ`, and roughly **5 GB of VRAM/RAM** stays reserved. Turn it
+  same server is reused across jobs; statuses are `LOADING MODEL…` and
+  `MODEL IN MEMORY`, and roughly **5 GB of VRAM/RAM** stays reserved. Turn it
   off when memory is needed elsewhere; a failed preload is reported but does not
   block recognition.
-- **Run.** **РАСПОЗНАТЬ** runs in a background thread with progress, per-page
+- **Run.** **RECOGNIZE** runs in a background thread with progress, per-page
   status, a log and cancel. Cancel kills the request and the `llama-server`
   process tree; closing the window cancels the job and waits for the sidecar to
   stop.
-- **Results.** **ОТКРЫТЬ ПАПКУ**, **ОТКРЫТЬ HTML**, **ОТКРЫТЬ MD**,
-  **ОТКРЫТЬ JSON**. Each file button appears only when that file exists, so
-  **ОТКРЫТЬ MD** is absent for an HTML-only or JSON-only job.
+- **Results.** **OPEN FOLDER**, **OPEN HTML**, **OPEN MD**,
+  **OPEN JSON**. Each file button appears only when that file exists, so
+  **OPEN MD** is absent for an HTML-only or JSON-only job.
 - **Shortcuts.** `Ctrl+O` adds files, `Ctrl+Enter` starts recognition, `Esc`
   cancels.
 - **Saved preferences.** Output folder, format, device, DPI, block extraction,
@@ -455,10 +454,10 @@ files are listed in `<stem>_meta.json` (`images`, plus `assets` for all files).
   from 4.1 s to 1.7 s and the page from **19.65 s to 16.53 s (−16%)**; the
   invoice spot check kept its key fields. Other documents can differ: on a
   two-page contract the fast output changed one order/date line, so Quality
-  stays the default for legal and financial work. Caveat: table labels such as
-  `БИК` / `Сч. №` can shift one row down, so verify bank and table data before
-  using it for form automation. `--image-max-tokens N` accepts 1–4096 for
-  experiments; `--fast` wins when both are given. The token cap is passed to
+  stays the default for legal and financial work. Caveat: Russian bank labels
+  (`BIK`, account number) can shift one row down, so verify bank and table data
+  before using it for form automation. `--image-max-tokens N` accepts 1–4096
+  for experiments; `--fast` wins when both are given. The token cap is passed to
   llama-server as `LLAMA_ARG_IMAGE_MAX_TOKENS`, which also works with builds
   that lack the command-line flag.
 - **Two pages at once:** `--parallel-pages 2` starts `llama-server` with
@@ -481,14 +480,14 @@ $env:OCR_PDFIUM       = "C:\tools\pdfium\pdfium.dll"
 ```
 
 or use `--llama-dir`, `--model-dir`, `--pdfium` on the CLI / the model dir,
-llama dir and PDFium fields under **ДОПОЛНИТЕЛЬНО** in the GUI. The engine
-folder in the setup panel (and the picker under **ДОПОЛНИТЕЛЬНО**) fills the
+llama dir and PDFium fields under **ADVANCED** in the GUI. The engine
+folder in the setup panel (and the picker under **ADVANCED**) fills the
 llama directory and the PDFium library from
 `runtime/<os>-<arch>/{llama-vulkan,llama-cpu,pdfium}`; the GUI then uses
 `llama-vulkan`/`llama-cpu` and `pdfium/bin|lib/<lib>`. The same folder is where
-**СКАЧАТЬ ДВИЖОК** installs the pinned archives. Model and runtime folders are
+**DOWNLOAD ENGINE** installs the pinned archives. Model and runtime folders are
 independent
-on purpose — set both to keep everything in one place. **ДОПОЛНИТЕЛЬНО** opens
+on purpose — set both to keep everything in one place. **ADVANCED** opens
 automatically while setup is incomplete (model, `llama-server` or PDFium
 missing) and keeps the optional overrides. The full lookup order is in
 [Search order](#search-order).
@@ -638,8 +637,8 @@ bundled runtime.
 ### Privacy and network access
 
 All recognition is local. The only network operations are explicit model
-downloads (the GUI **СКАЧАТЬ МОДЕЛЬ** button or `models download`, both to
-Hugging Face) and explicit runtime downloads (the GUI **СКАЧАТЬ ДВИЖОК**
+downloads (the GUI **DOWNLOAD MODEL** button or `models download`, both to
+Hugging Face) and explicit runtime downloads (the GUI **DOWNLOAD ENGINE**
 button or `runtime download`, both to GitHub), plus the packaging
 `fetch-runtime` scripts. No telemetry. Output files can contain sensitive text;
 protect them accordingly.
@@ -704,7 +703,7 @@ Packaging (the model is not included):
 
 `scripts/fetch-runtime.ps1|.sh` download the pinned llama.cpp and PDFium
 archives into `runtime/<target>/` for packaging; GUI and CLI users do not need
-them (**СКАЧАТЬ ДВИЖОК** / `runtime download` install the same layout).
+them (**DOWNLOAD ENGINE** / `runtime download` install the same layout).
 `scripts/package.ps1|.sh` copy the executables, `runtime/<target>`,
 `README.md`/`README.ru.md`, `LICENSE`, `CHANGELOG.md` and `NOTICE` into `dist/`.
 GitHub Actions runs the test/build matrix on Windows, Ubuntu and macOS and
