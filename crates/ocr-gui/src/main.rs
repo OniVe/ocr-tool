@@ -13,6 +13,7 @@ mod ui;
 
 pub(crate) use i18n::Lang;
 
+use i18n::plural;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,10 +46,11 @@ fn main() -> eframe::Result<()> {
         log_path.display()
     ));
 
+    let lang = initial_lang();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 840.0])
         .with_min_inner_size([1000.0, 720.0])
-        .with_title("ocr-tool — распознавание документов")
+        .with_title(lang.title())
         // The pixel header is the title bar: no native white Windows chrome.
         // The window stays resizable, keeps its icon and appears on the taskbar.
         .with_decorations(false)
@@ -72,23 +74,41 @@ fn main() -> eframe::Result<()> {
         Ok(()) => gui_log::write("ocr-tool-gui exited normally"),
         Err(error) => {
             gui_log::write(format!("fatal: cannot start the GUI: {error:#}"));
-            show_startup_error(&format!("cannot start the GUI: {error:#}"), &log_path);
+            show_startup_error(lang, &format!("cannot start the GUI: {error:#}"), &log_path);
         }
     }
     result
 }
 
+/// Interface language before the app exists: environment override, remembered
+/// choice, then the OS locale.
+fn initial_lang() -> Lang {
+    lang_from_prefs(&prefs::load())
+}
+
+fn lang_from_prefs(prefs: &prefs::GuiPrefs) -> Lang {
+    std::env::var("OCR_GUI_LANG")
+        .ok()
+        .and_then(|code| Lang::from_code(&code))
+        .or_else(|| prefs.lang.as_deref().and_then(Lang::from_code))
+        .unwrap_or_else(Lang::detect)
+}
+
 /// A release GUI has no console, so a fatal error before the window exists is
 /// reported twice: the file log keeps the full error/backtrace, and a dialog
 /// names the log path.
-fn show_startup_error(error: &str, log_path: &Path) {
-    let description = format!(
-        "Не удалось запустить окно.\n\n{error}\n\nПолный журнал: {}",
-        log_path.display()
+fn show_startup_error(lang: Lang, error: &str, log_path: &Path) {
+    let log_display = log_path.display();
+    let description = fill(
+        trf(
+            lang,
+            "Не удалось запустить окно.\n\n{}\n\nПолный журнал: {}",
+        ),
+        &[&error, &log_display],
     );
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
-        .set_title("ocr-tool — не удалось запустить")
+        .set_title(tr(lang, "ocr-tool — не удалось запустить"))
         .set_description(description)
         .show();
 }
@@ -367,11 +387,7 @@ impl OcrApp {
         let prefs = prefs::load();
         // Priority: explicit environment override, the remembered choice, then
         // the operating-system locale.
-        let lang = std::env::var("OCR_GUI_LANG")
-            .ok()
-            .and_then(|code| Lang::from_code(&code))
-            .or_else(|| prefs.lang.as_deref().and_then(Lang::from_code))
-            .unwrap_or_else(Lang::detect);
+        let lang = lang_from_prefs(&prefs);
         let demo = demo::Demo::from_env();
         let run_demo = demo.run;
         let demo_state = demo.state.clone();
@@ -442,7 +458,7 @@ impl OcrApp {
             rx: None,
             progress: 0.0,
             job_progress: 0.0,
-            status: "Добавьте файлы — начнём с шага 1.".to_string(),
+            status: tr(lang, "Добавьте файлы — начнём с шага 1.").to_string(),
             logs: Vec::new(),
             last_report: None,
             last_error: None,
@@ -562,7 +578,7 @@ impl OcrApp {
                     ],
                     documents: Vec::new(),
                 });
-                self.status = format!("Готово: {} файлов, 12 страниц.", files);
+                self.status = result_text(self.lang, files, 12);
             }
             Some("running") => {
                 self.running = true;
@@ -581,11 +597,15 @@ impl OcrApp {
                 self.pages_done = 1;
                 self.page_seconds_total = 18.0;
                 self.job_progress = 0.4;
-                self.status = "Страница 2 из 5: распознаём…".to_string();
+                self.status = fill(trf(self.lang, "Страница {} из {}: распознаём…"), &[&2, &5]);
             }
             Some("error") => {
                 self.last_error = Some(
-                    "Не удалось прочитать файл. Он не изменён. Выберите другой файл.".to_string(),
+                    tr(
+                        self.lang,
+                        "Не удалось прочитать файл. Он не изменён. Выберите другой файл.",
+                    )
+                    .to_string(),
                 );
                 self.last_error_kind = FailureKind::File;
                 self.status = self.last_error.clone().unwrap_or_default();
@@ -713,7 +733,7 @@ impl OcrApp {
                 self.stop_preload_state();
                 self.log("preload: disabled; releasing the model", false);
                 if !self.running {
-                    self.status = "Предзагрузка выключена.".to_string();
+                    self.status = tr(self.lang, "Предзагрузка выключена.").to_string();
                 }
             }
             return;
@@ -725,7 +745,8 @@ impl OcrApp {
         if let Some(server) = &self.preloaded {
             if !server.is_alive() {
                 self.preloaded = None;
-                self.preload_error = Some("Движок предзагрузки остановился.".to_string());
+                self.preload_error =
+                    Some(tr(self.lang, "Движок предзагрузки остановился.").to_string());
                 self.log(
                     "warning: preloaded engine is no longer running; the next job will start its own",
                     true,
@@ -759,7 +780,7 @@ impl OcrApp {
         self.preload_rx = Some(rx);
         self.preloading = true;
         if !self.running {
-            self.status = "Загружаем модель в память…".to_string();
+            self.status = tr(self.lang, "Загружаем модель в память…").to_string();
         }
         self.log(
             format!(
@@ -796,8 +817,10 @@ impl OcrApp {
                     self.preloading = false;
                     self.preload_rx = None;
                     if self.preload_error.is_none() {
-                        self.preload_error =
-                            Some("Поток предзагрузки завершился без результата.".to_string());
+                        self.preload_error = Some(
+                            tr(self.lang, "Поток предзагрузки завершился без результата.")
+                                .to_string(),
+                        );
                         self.log(
                             "warning: preload thread exited without reporting a result",
                             true,
@@ -812,7 +835,10 @@ impl OcrApp {
                     self.preload_rx = None;
                     self.preload_error = None;
                     self.preloaded = Some(server);
-                    let text = "Модель в памяти — первый документ начнётся быстрее.";
+                    let text = tr(
+                        self.lang,
+                        "Модель в памяти — первый документ начнётся быстрее.",
+                    );
                     self.log(text, false);
                     if !self.running {
                         self.status = text.to_string();
@@ -824,9 +850,11 @@ impl OcrApp {
                     self.preload_error = Some(error.clone());
                     self.log(format!("warning: cannot preload model: {error}"), true);
                     if !self.running {
-                        self.status =
-                            "Предзагрузка не удалась — распознавание запустит движок само."
-                                .to_string();
+                        self.status = tr(
+                            self.lang,
+                            "Предзагрузка не удалась — распознавание запустит движок само.",
+                        )
+                        .to_string();
                     }
                 }
                 _ => {
@@ -887,17 +915,20 @@ impl OcrApp {
     /// Why the main button cannot be pressed right now. `None` means ready.
     fn start_blocker(&self) -> Option<&'static str> {
         if self.running {
-            Some("Распознавание уже идёт.")
+            Some(tr(self.lang, "Распознавание уже идёт."))
         } else if self.downloading || self.runtime_downloading {
-            Some("Дождитесь окончания загрузки.")
+            Some(tr(self.lang, "Дождитесь окончания загрузки."))
         } else if self.inputs.is_empty() {
-            Some("Сначала добавьте файлы.")
+            Some(tr(self.lang, "Сначала добавьте файлы."))
         } else if !self.setup_complete() {
-            Some("Сначала подготовьте инструменты в карточке выше.")
+            Some(tr(
+                self.lang,
+                "Сначала подготовьте инструменты в карточке выше.",
+            ))
         } else if self.output_dir.trim().is_empty() {
-            Some("Выберите папку для сохранения.")
+            Some(tr(self.lang, "Выберите папку для сохранения."))
         } else if self.preloading && self.preload_error.is_none() {
-            Some("Модель загружается в память…")
+            Some(tr(self.lang, "Модель загружается в память…"))
         } else {
             None
         }
@@ -953,7 +984,7 @@ impl OcrApp {
         }
         let output_dir = PathBuf::from(self.output_dir.trim());
         if output_dir.as_os_str().is_empty() {
-            self.status = "Выберите папку для сохранения.".to_string();
+            self.status = tr(self.lang, "Выберите папку для сохранения.").to_string();
             return;
         }
 
@@ -995,7 +1026,7 @@ impl OcrApp {
         self.last_error_kind = FailureKind::Unknown;
         self.download_notice = false;
         self.logs.clear();
-        self.status = "Готовим документы…".to_string();
+        self.status = tr(self.lang, "Готовим документы…").to_string();
         self.job_started = Some(Instant::now());
         self.job_files_total = self.inputs.len();
         self.job_file_index = 0;
@@ -1045,7 +1076,11 @@ impl OcrApp {
         self.maybe_refresh_setup();
         let dir = self.resolved_model_dir();
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.status = "Не могу создать папку для модели. Проверьте права доступа.".to_string();
+            self.status = tr(
+                self.lang,
+                "Не могу создать папку для модели. Проверьте права доступа.",
+            )
+            .to_string();
             self.log(
                 format!("error: cannot create {}: {error}", dir.display()),
                 true,
@@ -1055,14 +1090,14 @@ impl OcrApp {
         self.downloading = true;
         self.confirm_replace = false;
         self.progress = 0.0;
-        self.download_text = "Готовим загрузку…".to_string();
+        self.download_text = tr(self.lang, "Готовим загрузку…").to_string();
         self.download_last_percent = None;
         self.download_file_index = 0;
         self.download_file_total = 0;
         self.download_started = None;
         self.last_error = None;
         self.download_notice = false;
-        self.status = "Скачиваем модель…".to_string();
+        self.status = tr(self.lang, "Скачиваем модель…").to_string();
         self.log(
             format!(
                 "download{}: {REPO_URL} -> {}",
@@ -1098,7 +1133,7 @@ impl OcrApp {
         if self.runtime.is_ready() {
             self.download_notice = false;
         }
-        let status = runtime_message_ru(&self.runtime);
+        let status = runtime_message(self.lang, &self.runtime);
         self.log(
             format!("runtime folder: {} — {status}", folder.display()),
             !self.runtime.is_ready(),
@@ -1140,7 +1175,11 @@ impl OcrApp {
         self.maybe_refresh_setup();
         let dir = self.target_runtime_dir();
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.status = "Не могу создать папку для движка. Проверьте права доступа.".to_string();
+            self.status = tr(
+                self.lang,
+                "Не могу создать папку для движка. Проверьте права доступа.",
+            )
+            .to_string();
             self.log(
                 format!("error: cannot create {}: {error}", dir.display()),
                 true,
@@ -1150,13 +1189,13 @@ impl OcrApp {
         self.runtime_downloading = true;
         self.confirm_runtime_replace = false;
         self.progress = 0.0;
-        self.runtime_text = "Готовим загрузку…".to_string();
+        self.runtime_text = tr(self.lang, "Готовим загрузку…").to_string();
         self.runtime_last_percent = None;
         self.runtime_started = None;
         self.runtime_component = None;
         self.last_error = None;
         self.download_notice = false;
-        self.status = "Скачиваем движок…".to_string();
+        self.status = tr(self.lang, "Скачиваем движок…").to_string();
         self.log(
             format!(
                 "runtime download{}: llama.cpp b12535 + pdfium 8165 -> {}",
@@ -1195,14 +1234,19 @@ impl OcrApp {
                             self.running = false;
                             self.cancelling = false;
                             self.last_error = Some(
-                                "Работа неожиданно остановилась. Документы не изменены. \
-                                 Подробности — в журнале."
-                                    .to_string(),
+                                tr(
+                                    self.lang,
+                                    "Работа неожиданно остановилась. Документы не изменены. \
+                                     Подробности — в журнале.",
+                                )
+                                .to_string(),
                             );
                             self.last_error_kind = FailureKind::Unknown;
-                            self.status =
-                                "Работа неожиданно остановилась. Подробности — в журнале."
-                                    .to_string();
+                            self.status = tr(
+                                self.lang,
+                                "Работа неожиданно остановилась. Подробности — в журнале.",
+                            )
+                            .to_string();
                             self.log(
                                 "error: worker thread exited without reporting a result"
                                     .to_string(),
@@ -1211,9 +1255,11 @@ impl OcrApp {
                         }
                         if self.downloading {
                             self.downloading = false;
-                            self.status =
-                                "Загрузка модели остановилась. Проверьте интернет и повторите."
-                                    .to_string();
+                            self.status = tr(
+                                self.lang,
+                                "Загрузка модели остановилась. Проверьте интернет и повторите.",
+                            )
+                            .to_string();
                             self.log(
                                 "error: download thread exited without reporting a result"
                                     .to_string(),
@@ -1222,9 +1268,11 @@ impl OcrApp {
                         }
                         if self.runtime_downloading {
                             self.runtime_downloading = false;
-                            self.status =
-                                "Загрузка движка остановилась. Проверьте интернет и повторите."
-                                    .to_string();
+                            self.status = tr(
+                                self.lang,
+                                "Загрузка движка остановилась. Проверьте интернет и повторите.",
+                            )
+                            .to_string();
                             self.log(
                                 "error: runtime download thread exited without reporting a result"
                                     .to_string(),
@@ -1247,27 +1295,22 @@ impl OcrApp {
                         Ok(report) => {
                             let partial = report.documents_failed > 0 || report.pages_failed > 0;
                             self.status = if report.cancelled {
-                                "Остановлено. Уже готовые страницы сохранены.".to_string()
+                                tr(self.lang, "Остановлено. Уже готовые страницы сохранены.")
+                                    .to_string()
                             } else if partial {
-                                format!(
-                                    "Готово с замечаниями: {} сохранено, {} не удалось. \
-                                     Подробности — в журнале.",
-                                    format_pages(report.pages_ok),
-                                    format_pages(report.pages_failed)
+                                fill(
+                                    trf(
+                                        self.lang,
+                                        "Готово с замечаниями: {} сохранено, {} не удалось. \
+                                         Подробности — в журнале.",
+                                    ),
+                                    &[
+                                        &format_pages(self.lang, report.pages_ok),
+                                        &format_pages(self.lang, report.pages_failed),
+                                    ],
                                 )
                             } else {
-                                format!(
-                                    "Готово: {} {}, {} {}.",
-                                    report.documents_ok,
-                                    ui::plural_ru(report.documents_ok, "файл", "файла", "файлов"),
-                                    report.pages_ok,
-                                    ui::plural_ru(
-                                        report.pages_ok,
-                                        "страница",
-                                        "страницы",
-                                        "страниц"
-                                    ),
-                                )
+                                result_text(self.lang, report.documents_ok, report.pages_ok)
                             };
                             if partial {
                                 let status = self.status.clone();
@@ -1282,7 +1325,7 @@ impl OcrApp {
                             // Keep the raw chain in the log only; the status bar
                             // names the cause and never shows `os error 3`.
                             self.last_error_kind = classify_failure(&error);
-                            self.last_error = Some(friendly_failure(&error));
+                            self.last_error = Some(friendly_failure(self.lang, &error));
                             self.status = self.last_error.clone().unwrap_or_default();
                             self.log(format!("error: {error}"), true);
                         }
@@ -1311,17 +1354,20 @@ impl OcrApp {
                             }
                             self.refresh_setup();
                             self.status = if self.model_status.is_ready() {
-                                "Модель готова. Можно продолжать.".to_string()
+                                tr(self.lang, "Модель готова. Можно продолжать.").to_string()
                             } else {
-                                "Файлы модели неполные. Нажмите «Заменить…», чтобы скачать заново."
-                                    .to_string()
+                                tr(
+                                    self.lang,
+                                    "Файлы модели неполные. Нажмите «Заменить…», чтобы скачать заново.",
+                                )
+                                .to_string()
                             };
                             let error = !self.model_status.is_ready();
                             self.log(self.status.clone(), error);
                         }
                         Err(error) => {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
-                            self.status = download_failure_status(&error, cancelled);
+                            self.status = download_failure_status(self.lang, &error, cancelled);
                             self.download_text = self.status.clone();
                             self.download_notice = true;
                             self.log(format!("error: {error}"), true);
@@ -1366,9 +1412,13 @@ impl OcrApp {
                                 false,
                             );
                             self.status = if self.runtime.is_ready() {
-                                "Движок и просмотр PDF готовы. Можно распознавать.".to_string()
+                                tr(
+                                    self.lang,
+                                    "Движок и просмотр PDF готовы. Можно распознавать.",
+                                )
+                                .to_string()
                             } else {
-                                runtime_message_ru(&self.runtime)
+                                runtime_message(self.lang, &self.runtime)
                             };
                             let error = !self.runtime.is_ready();
                             self.log(self.status.clone(), error);
@@ -1376,13 +1426,19 @@ impl OcrApp {
                         Err(error) => {
                             let cancelled = error.to_ascii_lowercase().contains("cancel");
                             self.status = if cancelled {
-                                "Загрузка движка остановлена. Часть файлов сохранена — при \
-                                 следующей попытке продолжим."
-                                    .to_string()
+                                tr(
+                                    self.lang,
+                                    "Загрузка движка остановлена. Часть файлов сохранена — при \
+                                     следующей попытке продолжим.",
+                                )
+                                .to_string()
                             } else {
-                                "Не удалось скачать движок. Проверьте подключение к интернету \
-                                 и повторите."
-                                    .to_string()
+                                tr(
+                                    self.lang,
+                                    "Не удалось скачать движок. Проверьте подключение к интернету \
+                                     и повторите.",
+                                )
+                                .to_string()
                             };
                             self.runtime_text = self.status.clone();
                             self.download_notice = true;
@@ -1406,20 +1462,20 @@ impl OcrApp {
         let fraction = (progress.downloaded as f32 / total as f32).min(1.0);
         self.progress = fraction;
         let percent = (fraction * 100.0).round() as u32;
-        let label = runtime_component_label(progress.component);
+        let label = runtime_component_label(self.lang, progress.component);
         let suffix = if progress.skipped {
-            " • уже на месте"
+            format!(" • {}", tr(self.lang, "уже на месте"))
         } else {
-            ""
+            String::new()
         };
         self.runtime_text = format!(
             "{label} • {}{suffix}",
             ui::progress_text(progress.downloaded, progress.total, self.runtime_started)
         );
         self.status = if progress.done {
-            format!("{label}: готово.")
+            fill(trf(self.lang, "{}: готово."), &[&label])
         } else {
-            "Скачиваем движок…".to_string()
+            tr(self.lang, "Скачиваем движок…").to_string()
         };
         let bucket = percent / 10;
         if progress.done
@@ -1449,19 +1505,20 @@ impl OcrApp {
         let percent = (fraction * 100.0).round() as u32;
         let mut text = ui::progress_text(progress.downloaded, total, self.download_started);
         if self.download_file_total > 1 {
-            text = format!(
-                "Файл {} из {} • {text}",
-                progress.file_index, self.download_file_total
+            text = fill(
+                trf(self.lang, "Файл {} из {} • {}"),
+                &[&progress.file_index, &self.download_file_total, &text],
             );
         }
         if progress.skipped {
-            text.push_str(" • уже на месте");
+            text.push_str(" • ");
+            text.push_str(tr(self.lang, "уже на месте"));
         }
         self.download_text = text;
         self.status = if progress.done {
-            "Модель: файл готов.".to_string()
+            tr(self.lang, "Модель: файл готов.").to_string()
         } else {
-            "Скачиваем модель…".to_string()
+            tr(self.lang, "Скачиваем модель…").to_string()
         };
         let bucket = percent / 10;
         if progress.done
@@ -1479,7 +1536,7 @@ impl OcrApp {
                 self.job_files_total = files;
                 self.job_file_index = 0;
                 self.job_progress = 0.0;
-                self.status = "Готовим документы…".to_string();
+                self.status = tr(self.lang, "Готовим документы…").to_string();
                 self.log(format!("job: {files} file(s) -> {output_dir}"), false);
             }
             ProgressEvent::FileStarted { index, total, path } => {
@@ -1495,9 +1552,13 @@ impl OcrApp {
                 } else {
                     0.0
                 };
-                self.status = format!(
-                    "Файл {index} из {total}: {}",
-                    self.current_file.as_deref().unwrap_or(&path)
+                self.status = fill(
+                    trf(self.lang, "Файл {} из {}: {}"),
+                    &[
+                        &index,
+                        &total,
+                        &self.current_file.as_deref().unwrap_or(&path),
+                    ],
                 );
                 self.log(format!("[{index}/{total}] {path}"), false);
             }
@@ -1513,12 +1574,18 @@ impl OcrApp {
                 self.page_selected_index = selected_index;
                 self.page_selected_total = selected_total;
                 self.status = if selected_total > 0 && selected_total != total_pages {
-                    format!(
-                        "Страница {page} из {total_pages} (выбрано {selected_index} из \
-                         {selected_total}): распознаём…"
+                    fill(
+                        trf(
+                            self.lang,
+                            "Страница {} из {} (выбрано {} из {}): распознаём…",
+                        ),
+                        &[&page, &total_pages, &selected_index, &selected_total],
                     )
                 } else {
-                    format!("Страница {page} из {total_pages}: распознаём…")
+                    fill(
+                        trf(self.lang, "Страница {} из {}: распознаём…"),
+                        &[&page, &total_pages],
+                    )
                 };
                 let files = self.job_files_total.max(1) as f32;
                 let file_position = self.job_file_index.saturating_sub(1) as f32;
@@ -1572,15 +1639,16 @@ impl OcrApp {
                 let files = self.job_files_total.max(1) as f32;
                 self.job_progress = (self.job_file_index as f32 / files).clamp(0.0, 0.99);
                 if self.job_files_total > 1 {
-                    self.status = format!(
-                        "Файл {} из {} готов.",
-                        self.job_file_index, self.job_files_total
+                    self.status = fill(
+                        trf(self.lang, "Файл {} из {} готов."),
+                        &[&self.job_file_index, &self.job_files_total],
                     );
                 }
             }
             ProgressEvent::FileFailed { error, .. } => {
                 self.log(format!("  FAILED: {error}"), true);
-                self.status = "Один файл не удался, остальные продолжаются.".to_string();
+                self.status =
+                    tr(self.lang, "Один файл не удался, остальные продолжаются.").to_string();
             }
             ProgressEvent::Log { level, message } => {
                 let error = matches!(level, LogLevel::Error);
@@ -1592,17 +1660,27 @@ impl OcrApp {
                 elapsed,
                 cancelled,
             } => {
-                self.status = format!(
-                    "Завершено за {:.1} с: {} {}, {} не удалось{}",
-                    elapsed.as_secs_f64(),
-                    documents_ok,
-                    ui::plural_ru(documents_ok, "файл", "файла", "файлов"),
-                    documents_failed,
-                    if cancelled {
-                        ", остановлено"
-                    } else {
-                        ""
-                    }
+                let seconds = format!("{:.1}", elapsed.as_secs_f64());
+                let suffix = if cancelled {
+                    tr(self.lang, ", остановлено")
+                } else {
+                    ""
+                };
+                self.status = fill(
+                    trf(self.lang, "Завершено за {} с: {} {}, {} не удалось{}"),
+                    &[
+                        &seconds,
+                        &documents_ok,
+                        &plural(
+                            self.lang,
+                            documents_ok as u64,
+                            ["файл", "файла", "файлов"],
+                            ["file", "files"],
+                            "个文件",
+                        ),
+                        &documents_failed,
+                        &suffix,
+                    ],
                 );
             }
         }
@@ -1624,8 +1702,11 @@ impl OcrApp {
         });
         if open {
             if self.running || self.downloading || self.runtime_downloading {
-                self.status =
-                    "Дождитесь окончания текущего действия, затем добавьте файлы.".to_string();
+                self.status = tr(
+                    self.lang,
+                    "Дождитесь окончания текущего действия, затем добавьте файлы.",
+                )
+                .to_string();
             } else {
                 self.pick_files();
             }
@@ -1681,9 +1762,12 @@ impl eframe::App for OcrApp {
                 self.recursive = true;
                 self.save_prefs();
             }
-            self.status = format!(
-                "Добавлено в список: {}. Выберите папку и нажмите «Распознать».",
-                self.inputs.len()
+            self.status = fill(
+                trf(
+                    self.lang,
+                    "Добавлено в список: {}. Выберите папку и нажмите «Распознать».",
+                ),
+                &[&self.inputs.len()],
             );
         }
 
@@ -1764,31 +1848,306 @@ fn file_name_of(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn format_pages(pages: usize) -> String {
-    format!(
-        "{pages} {}",
-        ui::plural_ru(pages, "страница", "страницы", "страниц")
+/// English/Chinese substitution for a Russian interface string.
+///
+/// Russian is the source language, so `Lang::Ru` returns `ru` unchanged. The
+/// table holds every user-visible sentence of this file; an unknown key falls
+/// back to Russian instead of panicking.
+fn tr(lang: Lang, ru: &'static str) -> &'static str {
+    let (en, zh) = match ru {
+        "ocr-tool — не удалось запустить" => {
+            ("ocr-tool — failed to start", "ocr-tool — 启动失败")
+        }
+        "Не удалось запустить окно.\n\n{}\n\nПолный журнал: {}" => (
+            "Could not open the window.\n\n{}\n\nFull log: {}",
+            "无法打开窗口。\n\n{}\n\n完整日志：{}",
+        ),
+        "Добавьте файлы — начнём с шага 1." => (
+            "Add files to start at step 1.",
+            "请添加文件，从第 1 步开始。",
+        ),
+        "Готово: {} {}, {} {}." => ("Done: {} {}, {} {}.", "完成：{} {}，{} {}。"),
+        "Страница {} из {}: распознаём…" => (
+            "Page {} of {}: recognizing…",
+            "第 {} 页，共 {} 页：正在识别…",
+        ),
+        "Не удалось прочитать файл. Он не изменён. Выберите другой файл." => (
+            "Could not read the file. It was not changed. Choose another file.",
+            "无法读取文件。文件未被修改。请选择其他文件。",
+        ),
+        "Предзагрузка выключена." => ("Preload is off.", "预加载已关闭。"),
+        "Движок предзагрузки остановился." => {
+            ("The preloaded engine stopped.", "预加载引擎已停止。")
+        }
+        "Загружаем модель в память…" => (
+            "Loading the model into memory…",
+            "正在将模型加载到内存…",
+        ),
+        "Модель в памяти — первый документ начнётся быстрее." => (
+            "Model in memory — the first document starts faster.",
+            "模型已驻留内存——首个文档会更快开始。",
+        ),
+        "Предзагрузка не удалась — распознавание запустит движок само." => (
+            "Preload failed — recognition will start the engine itself.",
+            "预加载失败——识别时会自行启动引擎。",
+        ),
+        "Поток предзагрузки завершился без результата." => (
+            "The preload thread exited without a result.",
+            "预加载线程结束，但没有返回结果。",
+        ),
+        "Распознавание уже идёт." => ("Recognition is already running.", "识别正在进行中。"),
+        "Дождитесь окончания загрузки." => {
+            ("Wait for the download to finish.", "请等待下载完成。")
+        }
+        "Сначала добавьте файлы." => ("Add files first.", "请先添加文件。"),
+        "Сначала подготовьте инструменты в карточке выше." => (
+            "Set up the tools in the card above first.",
+            "请先在上方卡片中准备好工具。",
+        ),
+        "Выберите папку для сохранения." => ("Choose an output folder.", "请选择保存文件夹。"),
+        "Модель загружается в память…" => (
+            "The model is loading into memory…",
+            "模型正在加载到内存…",
+        ),
+        "Готовим документы…" => ("Preparing documents…", "正在准备文档…"),
+        "Не могу создать папку для модели. Проверьте права доступа." => (
+            "Cannot create the model folder. Check permissions.",
+            "无法创建模型文件夹。请检查访问权限。",
+        ),
+        "Готовим загрузку…" => ("Preparing the download…", "正在准备下载…"),
+        "Скачиваем модель…" => ("Downloading the model…", "正在下载模型…"),
+        "Не могу создать папку для движка. Проверьте права доступа." => (
+            "Cannot create the engine folder. Check permissions.",
+            "无法创建引擎文件夹。请检查访问权限。",
+        ),
+        "Скачиваем движок…" => ("Downloading the engine…", "正在下载引擎…"),
+        "Работа неожиданно остановилась. Документы не изменены. Подробности — в журнале." => (
+            "The job stopped unexpectedly. Documents were not changed. See the log for details.",
+            "任务意外停止。文档未被修改。详情见日志。",
+        ),
+        "Работа неожиданно остановилась. Подробности — в журнале." => (
+            "The job stopped unexpectedly. See the log for details.",
+            "任务意外停止。详情见日志。",
+        ),
+        "Загрузка модели остановилась. Проверьте интернет и повторите." => (
+            "The model download stopped. Check your connection and try again.",
+            "模型下载已中断。请检查网络后重试。",
+        ),
+        "Загрузка движка остановилась. Проверьте интернет и повторите." => (
+            "The engine download stopped. Check your connection and try again.",
+            "引擎下载已中断。请检查网络后重试。",
+        ),
+        "Остановлено. Уже готовые страницы сохранены." => (
+            "Stopped. Pages already finished are saved.",
+            "已停止。已完成的页面已保存。",
+        ),
+        "Готово с замечаниями: {} сохранено, {} не удалось. Подробности — в журнале." => (
+            "Done with warnings: {} saved, {} failed. See the log for details.",
+            "已完成，但有警告：已保存 {}，失败 {}。详情见日志。",
+        ),
+        "Модель готова. Можно продолжать." => (
+            "The model is ready. You can continue.",
+            "模型已就绪，可以继续。",
+        ),
+        "Файлы модели неполные. Нажмите «Заменить…», чтобы скачать заново." => (
+            "The model files are incomplete. Press “Replace…” to download them again.",
+            "模型文件不完整。请点击「替换…」重新下载。",
+        ),
+        "Движок и просмотр PDF готовы. Можно распознавать." => (
+            "The engine and PDF viewer are ready. You can start recognizing.",
+            "引擎和 PDF 查看器已就绪，可以开始识别。",
+        ),
+        "Загрузка движка остановлена. Часть файлов сохранена — при следующей попытке продолжим." => (
+            "The engine download was stopped. Some files are saved — the next attempt will continue.",
+            "引擎下载已停止。部分文件已保存，下次尝试将继续。",
+        ),
+        "Не удалось скачать движок. Проверьте подключение к интернету и повторите." => (
+            "Could not download the engine. Check your internet connection and try again.",
+            "无法下载引擎。请检查网络连接后重试。",
+        ),
+        "уже на месте" => ("already in place", "已存在"),
+        "{}: готово." => ("{}: done.", "{}：完成。"),
+        "Файл {} из {} • {}" => ("File {} of {} • {}", "文件 {} / {} • {}"),
+        "Модель: файл готов." => ("Model: file is ready.", "模型：文件已就绪。"),
+        "Файл {} из {}: {}" => ("File {} of {}: {}", "文件 {} / {}：{}"),
+        "Страница {} из {} (выбрано {} из {}): распознаём…" => (
+            "Page {} of {} (selected {} of {}): recognizing…",
+            "第 {} 页，共 {} 页（所选 {} / {}）：正在识别…",
+        ),
+        "Файл {} из {} готов." => ("File {} of {} ready.", "文件 {} / {} 已完成。"),
+        "Один файл не удался, остальные продолжаются." => (
+            "One file failed; the rest continue.",
+            "一个文件失败，其余继续。",
+        ),
+        "Завершено за {} с: {} {}, {} не удалось{}" => (
+            "Finished in {} s: {} {}, {} failed{}",
+            "耗时 {} 秒：{} {}，失败 {}{}",
+        ),
+        ", остановлено" => (", stopped", "，已停止"),
+        "Дождитесь окончания текущего действия, затем добавьте файлы." => (
+            "Wait for the current action to finish, then add files.",
+            "请等待当前操作完成后再添加文件。",
+        ),
+        "Добавлено в список: {}. Выберите папку и нажмите «Распознать»." => (
+            "Added to the list: {}. Choose a folder and press Recognize.",
+            "已添加到列表：{}。请选择保存文件夹并点击「识别」。",
+        ),
+        "движок для видеокарты" => ("GPU engine", "显卡引擎"),
+        "движок для процессора" => ("CPU engine", "处理器引擎"),
+        "движок для Apple" => ("Apple engine", "Apple 引擎"),
+        "просмотр PDF" => ("PDF viewer", "PDF 查看器"),
+        "Не хватает движка распознавания. Скачайте его или укажите папку с движком." => (
+            "The recognition engine is missing. Download it or choose the engine folder.",
+            "缺少识别引擎。请下载或指定引擎文件夹。",
+        ),
+        "Движок есть, но не хватает просмотрщика PDF. Скачайте движок или укажите папку." => (
+            "The engine is present, but the PDF viewer is missing. Download the engine or choose its folder.",
+            "引擎已存在，但缺少 PDF 查看器。请下载引擎或指定文件夹。",
+        ),
+        "Движок и просмотр PDF готовы." => (
+            "The engine and PDF viewer are ready.",
+            "引擎和 PDF 查看器已就绪。",
+        ),
+        "Загрузка остановлена. Следующая попытка продолжится с места остановки." => (
+            "The download was stopped. The next attempt will resume where it left off.",
+            "下载已停止。下次尝试将从断点继续。",
+        ),
+        "Файлы модели повреждены или отличаются. Нажмите «Заменить…», чтобы скачать заново." => (
+            "The model files are damaged or different. Press “Replace…” to download them again.",
+            "模型文件已损坏或内容不符。请点击「替换…」重新下载。",
+        ),
+        "Не удалось скачать модель. Проверьте подключение к интернету и повторите." => (
+            "Could not download the model. Check your internet connection and try again.",
+            "无法下载模型。请检查网络连接后重试。",
+        ),
+        "Не хватает модели распознавания. Скачайте её (около 3,4 ГБ) или укажите папку с моделью." => (
+            "The recognition model is missing. Download it (about 3.4 GB) or choose the model folder.",
+            "缺少识别模型。请下载（约 3.4 GB）或指定模型文件夹。",
+        ),
+        "Не хватает движка распознавания. Скачайте его (около 69 МБ) или укажите папку с движком." => (
+            "The recognition engine is missing. Download it (about 69 MB) or choose the engine folder.",
+            "缺少识别引擎。请下载（约 69 MB）或指定引擎文件夹。",
+        ),
+        "Для PDF нужен просмотрщик PDF. Скачайте движок или укажите папку, где он уже есть." => (
+            "PDFs need the PDF viewer. Download the engine or choose the folder where it already is.",
+            "处理 PDF 需要 PDF 查看器。请下载引擎，或指定其所在文件夹。",
+        ),
+        "Не могу писать в эту папку. Выберите другую папку." => (
+            "Cannot write to this folder. Choose another folder.",
+            "无法写入此文件夹。请选择其他文件夹。",
+        ),
+        "PDF защищён паролем. Введите пароль в разделе «PDF-ПАРОЛЬ»." => (
+            "The PDF is password-protected. Enter the password in the “PDF PASSWORD” section.",
+            "该 PDF 受密码保护。请在「PDF 密码」部分输入密码。",
+        ),
+        "Не получилось разобрать номера страниц. Укажите их так: 1-5,7 — или оставьте поле пустым." => (
+            "Could not parse the page numbers. Enter them like 1-5,7 — or leave the field empty.",
+            "无法解析页码。请按 1-5,7 的格式填写，或留空。",
+        ),
+        "Распознавание заняло слишком много времени. Попробуйте ещё раз или уменьшите число страниц." => (
+            "Recognition took too long. Try again or reduce the number of pages.",
+            "识别耗时过长。请重试或减少页数。",
+        ),
+        "Не получилось завершить распознавание. Документы не изменены. Попробуйте ещё раз." => (
+            "Could not finish recognition. Documents were not changed. Try again.",
+            "未能完成识别。文档未被修改。请重试。",
+        ),
+        "Подождите…" => ("Please wait…", "请稍候…"),
+        "{} {} {} — проверьте папку и нажмите «Распознать»." => (
+            "{} {} {} ready — check the folder and press Recognize.",
+            "{} {}{}——请检查保存文件夹，然后点击「识别」。",
+        ),
+        _ => return ru,
+    };
+    match lang {
+        Lang::En => en,
+        Lang::Zh => zh,
+        Lang::Ru => ru,
+    }
+}
+
+/// Same table for sentences with `{}` placeholders.
+///
+/// The number and order of the placeholders must match the Russian source;
+/// render the result with [`fill`].
+fn trf(lang: Lang, ru: &'static str) -> &'static str {
+    tr(lang, ru)
+}
+
+/// Minimal runtime replacement for `format!`: fills successive `{}` slots.
+fn fill(template: &str, args: &[&dyn std::fmt::Display]) -> String {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    for arg in args {
+        let Some((head, tail)) = rest.split_once("{}") else {
+            break;
+        };
+        out.push_str(head);
+        out.push_str(&arg.to_string());
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn result_text(lang: Lang, files: usize, pages: usize) -> String {
+    fill(
+        trf(lang, "Готово: {} {}, {} {}."),
+        &[
+            &files,
+            &plural(
+                lang,
+                files as u64,
+                ["файл", "файла", "файлов"],
+                ["file", "files"],
+                "个文件",
+            ),
+            &pages,
+            &plural(
+                lang,
+                pages as u64,
+                ["страница", "страницы", "страниц"],
+                ["page", "pages"],
+                "页",
+            ),
+        ],
     )
 }
 
-fn runtime_component_label(component: RuntimeComponent) -> &'static str {
-    match component {
-        RuntimeComponent::LlamaVulkan => "движок для видеокарты",
-        RuntimeComponent::LlamaCpu => "движок для процессора",
-        RuntimeComponent::LlamaMetal => "движок для Apple",
-        RuntimeComponent::Pdfium => "просмотр PDF",
-    }
+fn format_pages(lang: Lang, pages: usize) -> String {
+    format!(
+        "{pages} {}",
+        plural(
+            lang,
+            pages as u64,
+            ["страница", "страницы", "страниц"],
+            ["page", "pages"],
+            "页"
+        )
+    )
 }
 
-fn runtime_message_ru(runtime: &RuntimeStatus) -> String {
-    if !runtime.llama_ready() {
-        "Не хватает движка распознавания. Скачайте его или укажите папку с движком.".to_string()
+fn runtime_component_label(lang: Lang, component: RuntimeComponent) -> &'static str {
+    tr(
+        lang,
+        match component {
+            RuntimeComponent::LlamaVulkan => "движок для видеокарты",
+            RuntimeComponent::LlamaCpu => "движок для процессора",
+            RuntimeComponent::LlamaMetal => "движок для Apple",
+            RuntimeComponent::Pdfium => "просмотр PDF",
+        },
+    )
+}
+
+fn runtime_message(lang: Lang, runtime: &RuntimeStatus) -> String {
+    let ru = if !runtime.llama_ready() {
+        "Не хватает движка распознавания. Скачайте его или укажите папку с движком."
     } else if !runtime.pdfium_ready() {
         "Движок есть, но не хватает просмотрщика PDF. Скачайте движок или укажите папку."
-            .to_string()
     } else {
-        "Движок и просмотр PDF готовы.".to_string()
-    }
+        "Движок и просмотр PDF готовы."
+    };
+    tr(lang, ru).to_string()
 }
 
 /// A model download that stopped because the existing canonical file has the
@@ -1799,15 +2158,15 @@ fn download_needs_replace(error: &str) -> bool {
 }
 
 /// Status-bar text for a failed model download.
-fn download_failure_status(error: &str, cancelled: bool) -> String {
-    if cancelled {
-        "Загрузка остановлена. Следующая попытка продолжится с места остановки.".to_string()
+fn download_failure_status(lang: Lang, error: &str, cancelled: bool) -> String {
+    let ru = if cancelled {
+        "Загрузка остановлена. Следующая попытка продолжится с места остановки."
     } else if download_needs_replace(error) {
         "Файлы модели повреждены или отличаются. Нажмите «Заменить…», чтобы скачать заново."
-            .to_string()
     } else {
-        "Не удалось скачать модель. Проверьте подключение к интернету и повторите.".to_string()
-    }
+        "Не удалось скачать модель. Проверьте подключение к интернету и повторите."
+    };
+    tr(lang, ru).to_string()
 }
 
 /// Map a full error chain to a user-facing cause and the action that fixes it.
@@ -1849,95 +2208,101 @@ fn classify_failure(error: &str) -> FailureKind {
     }
 }
 
-/// Short Russian sentence for the main status. The raw chain (for example
-/// `os error 3`) goes to the log only; the main status must stay actionable on
-/// the first run.
-fn friendly_failure(error: &str) -> String {
-    match classify_failure(error) {
+/// Short sentence for the main status. The raw chain (for example `os error 3`)
+/// goes to the log only; the main status must stay actionable on the first run.
+fn friendly_failure(lang: Lang, error: &str) -> String {
+    let ru = match classify_failure(error) {
         FailureKind::Model => {
             "Не хватает модели распознавания. Скачайте её (около 3,4 ГБ) или укажите \
              папку с моделью."
-                .to_string()
         }
         FailureKind::Runtime => {
             "Не хватает движка распознавания. Скачайте его (около 69 МБ) или укажите \
              папку с движком."
-                .to_string()
         }
         FailureKind::Pdfium => {
             "Для PDF нужен просмотрщик PDF. Скачайте движок или укажите папку, где он \
              уже есть."
-                .to_string()
         }
-        FailureKind::File => {
-            "Не удалось прочитать файл. Он не изменён. Выберите другой файл.".to_string()
-        }
-        FailureKind::Output => "Не могу писать в эту папку. Выберите другую папку.".to_string(),
-        FailureKind::Password => {
-            "PDF защищён паролем. Введите пароль в разделе «PDF-ПАРОЛЬ».".to_string()
-        }
+        FailureKind::File => "Не удалось прочитать файл. Он не изменён. Выберите другой файл.",
+        FailureKind::Output => "Не могу писать в эту папку. Выберите другую папку.",
+        FailureKind::Password => "PDF защищён паролем. Введите пароль в разделе «PDF-ПАРОЛЬ».",
         FailureKind::Pages => {
             "Не получилось разобрать номера страниц. Укажите их так: 1-5,7 — или \
              оставьте поле пустым."
-                .to_string()
         }
         FailureKind::Timeout => {
             "Распознавание заняло слишком много времени. Попробуйте ещё раз или \
              уменьшите число страниц."
-                .to_string()
         }
         FailureKind::Unknown => {
             "Не получилось завершить распознавание. Документы не изменены. Попробуйте \
              ещё раз."
-                .to_string()
         }
-    }
+    };
+    tr(lang, ru).to_string()
 }
 
 /// Bottom-bar sentence for the derived phase. Pure so the declensions and the
 /// empty/idle/result wording can be unit-tested without a window.
+#[cfg(test)]
 fn status_text(phase: StatusPhase, detail: &str) -> String {
+    status_text_lang(Lang::Ru, phase, detail)
+}
+
+/// Language-aware bottom-bar sentence. The UI calls this with `app.lang`.
+pub(crate) fn status_text_lang(lang: Lang, phase: StatusPhase, detail: &str) -> String {
     match phase {
-        StatusPhase::Empty => "Добавьте файлы — начнём с шага 1.".to_string(),
+        StatusPhase::Empty => tr(lang, "Добавьте файлы — начнём с шага 1.").to_string(),
         StatusPhase::Idle(files) => {
-            let noun = ui::plural_ru(files, "файл", "файла", "файлов");
-            let verb = if noun == "файл" {
-                "готов"
-            } else {
-                "готовы"
+            let noun = plural(
+                lang,
+                files as u64,
+                ["файл", "файла", "файлов"],
+                ["file", "files"],
+                "个文件",
+            );
+            // "1 файл готов" vs "2 файла готовы" (ru), "1 file is ready" vs
+            // "2 files are ready" (en); Chinese appends a fixed predicate.
+            let verb = match lang {
+                Lang::Ru => {
+                    if noun == "файл" {
+                        "готов"
+                    } else {
+                        "готовы"
+                    }
+                }
+                Lang::En => {
+                    if files == 1 {
+                        "is"
+                    } else {
+                        "are"
+                    }
+                }
+                Lang::Zh => "已就绪",
             };
-            format!("{files} {noun} {verb} — проверьте папку и нажмите «Распознать».")
+            fill(
+                trf(lang, "{} {} {} — проверьте папку и нажмите «Распознать»."),
+                &[&files, &noun, &verb],
+            )
         }
         StatusPhase::Running | StatusPhase::Notice | StatusPhase::Error => {
             let detail = detail.trim();
             if detail.is_empty() {
-                "Подождите…".to_string()
+                tr(lang, "Подождите…").to_string()
             } else {
                 detail.to_string()
             }
         }
         StatusPhase::Result {
             cancelled: true, ..
-        } => "Остановлено. Уже готовые страницы сохранены.".to_string(),
+        } => tr(lang, "Остановлено. Уже готовые страницы сохранены.").to_string(),
         StatusPhase::Result {
             files,
             pages,
             cancelled: false,
-        } => format!(
-            "Готово: {} {}, {} {}.",
-            files,
-            ui::plural_ru(files, "файл", "файла", "файлов"),
-            pages,
-            ui::plural_ru(pages, "страница", "страницы", "страниц"),
-        ),
+        } => result_text(lang, files, pages),
     }
-}
-
-/// Language-aware bottom-bar sentence. The main writer replaces the body with
-/// real localization; until then it keeps the existing Russian wording.
-pub(crate) fn status_text_lang(lang: Lang, phase: StatusPhase, detail: &str) -> String {
-    let _ = lang; // main-writer заменит на реальную локализацию
-    status_text(phase, detail)
 }
 
 #[cfg(test)]
@@ -2017,6 +2382,93 @@ mod tests {
                 "старый текст"
             ),
             "Остановлено. Уже готовые страницы сохранены."
+        );
+    }
+
+    #[test]
+    fn status_text_lang_localizes_empty_idle_and_result_phases() {
+        assert_eq!(
+            status_text_lang(Lang::En, StatusPhase::Empty, ""),
+            "Add files to start at step 1."
+        );
+        assert_eq!(
+            status_text_lang(Lang::En, StatusPhase::Idle(1), ""),
+            "1 file is ready — check the folder and press Recognize."
+        );
+        assert_eq!(
+            status_text_lang(Lang::En, StatusPhase::Idle(5), ""),
+            "5 files are ready — check the folder and press Recognize."
+        );
+        assert_eq!(
+            status_text_lang(Lang::Zh, StatusPhase::Idle(2), ""),
+            "2 个文件已就绪——请检查保存文件夹，然后点击「识别」。"
+        );
+        assert_eq!(
+            status_text_lang(
+                Lang::En,
+                StatusPhase::Result {
+                    files: 2,
+                    pages: 5,
+                    cancelled: false
+                },
+                ""
+            ),
+            "Done: 2 files, 5 pages."
+        );
+        assert_eq!(
+            status_text_lang(
+                Lang::Zh,
+                StatusPhase::Result {
+                    files: 1,
+                    pages: 3,
+                    cancelled: false
+                },
+                ""
+            ),
+            "完成：1 个文件，3 页。"
+        );
+        assert_eq!(
+            status_text_lang(
+                Lang::Zh,
+                StatusPhase::Result {
+                    files: 1,
+                    pages: 3,
+                    cancelled: true
+                },
+                ""
+            ),
+            "已停止。已完成的页面已保存。"
+        );
+    }
+
+    #[test]
+    fn friendly_failure_localizes_english_and_chinese() {
+        assert_eq!(
+            friendly_failure(Lang::En, "PDFium not found: no PDFium library"),
+            "PDFs need the PDF viewer. Download the engine or choose the folder where it already is."
+        );
+        assert_eq!(
+            friendly_failure(Lang::Zh, "something unexpected"),
+            "未能完成识别。文档未被修改。请重试。"
+        );
+        for lang in [Lang::En, Lang::Zh] {
+            let message = friendly_failure(lang, "input does not exist: C:\\gone\\scan.pdf");
+            assert!(
+                !message.chars().any(|ch| ('А'..='я').contains(&ch)),
+                "a non-Russian message must not contain Cyrillic: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_failure_status_is_localized() {
+        assert_eq!(
+            download_failure_status(Lang::En, "download cancelled", true),
+            "The download was stopped. The next attempt will resume where it left off."
+        );
+        assert_eq!(
+            download_failure_status(Lang::Zh, "network down", false),
+            "无法下载模型。请检查网络连接后重试。"
         );
     }
 
@@ -2114,12 +2566,13 @@ mod tests {
     #[test]
     fn raw_os_errors_never_reach_the_status_bar() {
         let raw = "Model files not found in C:\\Users\\x\\AppData\\Local\\ocr-tool\\models\\chandra-ocr-2; use Download model or choose a folder: cannot read model directory C:\\Users\\x\\AppData\\Local\\ocr-tool\\models\\chandra-ocr-2: The system cannot find the path specified. (os error 3)";
-        let status = friendly_failure(raw);
+        let status = friendly_failure(Lang::Ru, raw);
         assert!(!status.contains("os error"), "{status}");
         assert!(status.contains("модели"), "{status}");
         assert_eq!(classify_failure(raw), FailureKind::Model);
 
         let runtime = friendly_failure(
+            Lang::Ru,
             "llama-server executable not found (device auto).\nSearched: C:\\runtime",
         );
         assert!(runtime.contains("движка"), "{runtime}");
@@ -2129,13 +2582,14 @@ mod tests {
         );
 
         let pdfium = friendly_failure(
+            Lang::Ru,
             "PDFium not found; choose the runtime folder or set OCR_PDFIUM: no PDFium library",
         );
         assert!(pdfium.contains("просмотрщик"), "{pdfium}");
         assert_eq!(classify_failure("PDFium not found"), FailureKind::Pdfium);
 
         assert_eq!(
-            friendly_failure("something unexpected\nsecond line"),
+            friendly_failure(Lang::Ru, "something unexpected\nsecond line"),
             "Не получилось завершить распознавание. Документы не изменены. Попробуйте ещё раз."
         );
     }
@@ -2143,6 +2597,7 @@ mod tests {
     #[test]
     fn common_failures_map_to_calm_russian_messages() {
         let output = friendly_failure(
+            Lang::Ru,
             "cannot create output directory D:\\readonly: Access is denied. (os error 5)",
         );
         assert!(output.contains("папку"), "{output}");
@@ -2152,20 +2607,20 @@ mod tests {
             FailureKind::Output
         );
 
-        let file = friendly_failure("input does not exist: C:\\gone\\scan.pdf");
+        let file = friendly_failure(Lang::Ru, "input does not exist: C:\\gone\\scan.pdf");
         assert!(file.contains("файл"), "{file}");
         assert_eq!(
             classify_failure("input does not exist: C:\\gone\\scan.pdf"),
             FailureKind::File
         );
 
-        let pages = friendly_failure("invalid --pages: 0");
+        let pages = friendly_failure(Lang::Ru, "invalid --pages: 0");
         assert!(pages.contains("страниц"), "{pages}");
 
-        let password = friendly_failure("PDF is encrypted; a password is required");
+        let password = friendly_failure(Lang::Ru, "PDF is encrypted; a password is required");
         assert!(password.contains("паролем"), "{password}");
 
-        let timeout = friendly_failure("request timed out after 600 s");
+        let timeout = friendly_failure(Lang::Ru, "request timed out after 600 s");
         assert!(timeout.contains("времени"), "{timeout}");
     }
 
@@ -2314,12 +2769,14 @@ mod tests {
                    chandra-ocr-2.Q4_K_M.gguf is 3066385440 bytes; pass --force to download \
                    the pinned file into C:\\models";
         assert!(download_needs_replace(raw));
-        let status = download_failure_status(raw, false);
+        let status = download_failure_status(Lang::Ru, raw, false);
         assert!(status.contains("Заменить"), "{status}");
         assert!(!status.contains("--force"), "{status}");
-        assert!(download_failure_status("download cancelled", true).contains("остановлена"));
+        assert!(
+            download_failure_status(Lang::Ru, "download cancelled", true).contains("остановлена")
+        );
         assert_eq!(
-            download_failure_status("network down", false),
+            download_failure_status(Lang::Ru, "network down", false),
             "Не удалось скачать модель. Проверьте подключение к интернету и повторите."
         );
     }
@@ -2386,6 +2843,7 @@ mod tests {
         app.timeout_secs += 30;
         assert_ne!(app.preload_key().as_deref(), Some(after_pdfium.as_str()));
 
+        app.lang = Lang::Ru;
         app.inputs.push(tmp.path().join("scan.pdf"));
         app.preloading = true;
         app.preload_error = None;
@@ -2426,6 +2884,7 @@ mod tests {
             mmproj_bytes: 0,
         };
         app.runtime = runtime_status(Some(&runtime), Some(&pdfium));
+        app.lang = Lang::Ru;
         assert!(app.setup_complete());
         assert!(!app.can_start(), "no files yet");
         assert_eq!(app.start_blocker(), Some("Сначала добавьте файлы."));
@@ -2488,7 +2947,7 @@ mod tests {
             "PDFium not found: no PDFium library",
             "unexpected failure chain",
         ] {
-            let message = friendly_failure(error);
+            let message = friendly_failure(Lang::Ru, error);
             assert!(!message.contains("os error"), "{message}");
             assert!(
                 message.chars().any(|ch| ('А'..='я').contains(&ch)),
