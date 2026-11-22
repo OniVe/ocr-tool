@@ -3,6 +3,9 @@ name = "ocr-gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Desktop GUI for ocr-tool"
 
 [[bin]]

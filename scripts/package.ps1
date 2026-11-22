@@ -42,6 +42,8 @@ try {
     }
     Copy-Item (Join-Path $Root "README.md") $stage
     Copy-Item (Join-Path $Root "README.ru.md") $stage
+    Copy-Item (Join-Path $Root "LICENSE") $stage
+    Copy-Item (Join-Path $Root "CHANGELOG.md") $stage
     Copy-Item (Join-Path $Root "NOTICE") $stage
     Copy-Item -Recurse $runtime (Join-Path $stage "runtime/$Target")
 

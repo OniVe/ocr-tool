@@ -3,6 +3,9 @@ name = "ocr-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "llama-server sidecar management and Chandra chat protocol for ocr-tool"
 
 [dependencies]

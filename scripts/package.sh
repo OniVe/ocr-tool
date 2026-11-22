@@ -31,7 +31,7 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/runtime"
 install -m 755 target/release/ocr-tool "$STAGE/"
 install -m 755 target/release/ocr-tool-gui "$STAGE/"
-cp README.md README.ru.md NOTICE "$STAGE/"
+cp README.md README.ru.md LICENSE CHANGELOG.md NOTICE "$STAGE/"
 cp -R "$RUNTIME" "$STAGE/runtime/$TARGET"
 
 ARCHIVE="$DIST/ocr-tool-$VERSION-$TARGET.tar.gz"

@@ -706,7 +706,8 @@ mod tests {
                         Ok(0) => break,
                         Ok(_) if header == "\r\n" || header == "\n" => break,
                         Ok(_) => {
-                            if let Some(value) = header.to_ascii_lowercase().strip_prefix("range:") {
+                            if let Some(value) = header.to_ascii_lowercase().strip_prefix("range:")
+                            {
                                 if let Some(bytes) = value.trim().strip_prefix("bytes=") {
                                     start = bytes
                                         .split('-')
