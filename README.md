@@ -231,8 +231,6 @@ file, for example `C:\docs\document.pdf` (Windows) or `path/to/document.pdf`
 Run `ocr-tool-gui.exe` (release) or `cargo run --release -p ocr-gui` from a
 source checkout; no CLI or environment variable is required.
 
-[![ocr-tool GUI after a finished job][gui-done]](docs/screenshots/pixel-ui/)
-
 - **Add files.** **ДОБАВИТЬ ФАЙЛЫ** opens a file picker, **ДОБАВИТЬ ПАПКУ**
   adds a folder, and drag and drop works too. Directories are scanned one level
   deep unless recursion is enabled.
@@ -788,5 +786,4 @@ Project Link: [https://github.com/onive/ocr-tool](https://github.com/onive/ocr-t
 [pdfium-url]: https://github.com/bblanchon/pdfium-binaries
 [chandra-shield]: https://img.shields.io/badge/Chandra%20OCR-2-0A7E8C?style=for-the-badge
 [chandra-url]: https://github.com/datalab-to/chandra
-[hero-screenshot]: docs/screenshots/pixel-ui/02-ready.png
-[gui-done]: docs/screenshots/pixel-ui/04-done.png
+[hero-screenshot]: docs/screenshots/pixel-ui/09-ready-en.png
