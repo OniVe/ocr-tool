@@ -52,16 +52,23 @@ Notable dependencies: eframe/egui (MIT/Apache-2.0), pdfium-render (MIT/Apache-2.
 ammonia (MIT), htmd (MIT), image (MIT/Apache-2.0), ureq (MIT/Apache-2.0),
 clap (MIT/Apache-2.0), rfd (MIT).
 
-6. Ark Pixel Font
------------------
-Source: https://github.com/TakWolf/ark-pixel-font
+6. Ark Pixel Font and Fusion Pixel Font subset
+-----------------------------------------------
+Ark Pixel source: https://github.com/TakWolf/ark-pixel-font
 Bundled file: assets/fonts/ArkPixel-12px-zh_hans.ttf
 Version: 2026.11.10 (12px monospaced, zh_hans)
 License: SIL Open Font License 1.1 (assets/fonts/OFL-ArkPixel.txt)
 Copyright (c) 2021, TakWolf (https://takwolf.com).
 
-The font is embedded into the GUI binary to render Chinese interface text. It
-is used only as a fallback after Press Start 2P and IBM Plex Mono.
+Fusion Pixel source: https://github.com/TakWolf/fusion-pixel-font
+Bundled file: assets/fonts/FusionPixel-12px-zh_hans-subset.ttf
+Version: 2026.11.10 (subset of 即嵌拖擎然窗警, seven glyphs missing from Ark Pixel)
+License: SIL Open Font License 1.1 plus the bundled Cubic 11 and Galmuri notices
+(assets/fonts/OFL-FusionPixel.txt)
+Copyright (c) 2022, TakWolf (https://takwolf.com).
+
+Both fonts are embedded into the GUI binary to render Chinese interface text.
+They are used only as fallbacks after Press Start 2P and IBM Plex Mono.
 
 7. Test samples
 ---------------

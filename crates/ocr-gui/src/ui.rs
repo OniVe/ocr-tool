@@ -52,6 +52,11 @@ const PLEX_BOLD: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Bold.
 /// Ark Pixel 12px (zh_hans) supplies the CJK glyphs the Latin faces lack. It is
 /// a fallback only: Latin text keeps Press Start 2P / IBM Plex Mono metrics.
 const ARK_PIXEL: &[u8] = include_bytes!("../../../assets/fonts/ArkPixel-12px-zh_hans.ttf");
+/// Seven UI glyphs are absent from the Ark Pixel release. This 2.5 KB subset
+/// from Fusion Pixel (same 12px pixel style, OFL) fills exactly those gaps:
+/// 即嵌拖擎然窗警. It stays last in every fallback chain.
+const FUSION_PIXEL_GAPS: &[u8] =
+    include_bytes!("../../../assets/fonts/FusionPixel-12px-zh_hans-subset.ttf");
 
 fn pixel_family() -> FontFamily {
     FontFamily::Name("pixel".into())
@@ -575,10 +580,10 @@ fn done_label(lang: Lang) -> &'static str {
     }
 }
 
-/// Register the four OFL faces once. `pixel` is a named family; the mono files
-/// replace the default proportional and monospace families, with egui's Latin
-/// fallbacks kept after them for rare glyphs. Ark Pixel is appended last in
-/// every chain so it only handles glyphs the primary faces do not cover.
+/// Register the embedded OFL faces once. `pixel` is a named family; the mono
+/// files replace the default proportional and monospace families, with egui's
+/// Latin fallbacks kept after them for rare glyphs. Ark Pixel and its Fusion
+/// Pixel gap subset are appended last so they only handle missing glyphs.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
@@ -597,12 +602,17 @@ pub fn install_fonts(ctx: &egui::Context) {
         "ark-pixel-12px-zh-hans".to_owned(),
         Arc::new(FontData::from_static(ARK_PIXEL)),
     );
+    fonts.font_data.insert(
+        "fusion-pixel-12px-gaps".to_owned(),
+        Arc::new(FontData::from_static(FUSION_PIXEL_GAPS)),
+    );
 
     fonts.families.insert(
         pixel_family(),
         vec![
             "press-start-2p".to_owned(),
             "ark-pixel-12px-zh-hans".to_owned(),
+            "fusion-pixel-12px-gaps".to_owned(),
         ],
     );
     fonts.families.insert(
@@ -611,12 +621,14 @@ pub fn install_fonts(ctx: &egui::Context) {
             "ibm-plex-mono-bold".to_owned(),
             "ibm-plex-mono".to_owned(),
             "ark-pixel-12px-zh-hans".to_owned(),
+            "fusion-pixel-12px-gaps".to_owned(),
         ],
     );
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         let chain = fonts.families.entry(family).or_default();
         chain.insert(0, "ibm-plex-mono".to_owned());
         chain.push("ark-pixel-12px-zh-hans".to_owned());
+        chain.push("fusion-pixel-12px-gaps".to_owned());
     }
     ctx.set_fonts(fonts);
 }
@@ -1214,8 +1226,10 @@ fn header(app: &mut OcrApp, ctx: &egui::Context) {
                             }
                             control_rects.push(help.rect);
                             ui.add_space(4.0);
-                            let language = language_button(ui, app.lang)
-                                .on_hover_text("Язык / Language / 语言");
+                            let language = language_button(ui, app.lang).on_hover_text(format!(
+                                "{} · Язык / Language / 语言",
+                                app.lang.name()
+                            ));
                             if language.clicked() {
                                 let next = app.lang.next();
                                 app.set_language(next);
@@ -3015,9 +3029,9 @@ fn advanced_grid(app: &mut OcrApp, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for lang in Lang::ALL {
-                    if segment(ui, lang.label(), app.lang == lang, true, 64.0).clicked()
-                        && app.lang != lang
-                    {
+                    let response = segment(ui, lang.label(), app.lang == lang, true, 64.0)
+                        .on_hover_text(lang.name());
+                    if response.clicked() && app.lang != lang {
                         app.set_language(lang);
                         app.save_prefs();
                     }
@@ -3661,17 +3675,6 @@ pub(crate) fn format_bytes(lang: Lang, bytes: u64) -> String {
     format!("{number} {}", units[unit])
 }
 
-/// Russian plural helper kept for the `main.rs` status strings. The UI itself
-/// uses the language-aware [`files_word`] / [`pages_word`] / [`i18n::plural`].
-pub(crate) fn plural_ru(
-    count: usize,
-    one: &'static str,
-    few: &'static str,
-    many: &'static str,
-) -> &'static str {
-    i18n::plural(Lang::Ru, count as u64, [one, few, many], [one, few], one)
-}
-
 fn is_pdf(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -3978,20 +3981,6 @@ impl OcrApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn russian_plurals_cover_the_awkward_cases() {
-        assert_eq!(plural_ru(1, "файл", "файла", "файлов"), "файл");
-        assert_eq!(plural_ru(2, "файл", "файла", "файлов"), "файла");
-        assert_eq!(plural_ru(4, "файл", "файла", "файлов"), "файла");
-        assert_eq!(plural_ru(5, "файл", "файла", "файлов"), "файлов");
-        assert_eq!(plural_ru(11, "файл", "файла", "файлов"), "файлов");
-        assert_eq!(plural_ru(21, "страница", "страницы", "страниц"), "страница");
-        assert_eq!(
-            plural_ru(102, "страница", "страницы", "страниц"),
-            "страницы"
-        );
-    }
 
     #[test]
     fn byte_sizes_are_localized_and_decimal() {
@@ -4431,8 +4420,45 @@ mod tests {
             ] {
                 let font = FontId::new(10.0, family.clone());
                 assert!(
-                    fonts.has_glyphs(&font, "中文语言保存文档识别结果"),
+                    fonts.has_glyphs(&font, "中文语言保存文档识别结果即嵌拖擎然窗警"),
                     "font family {family:?} is missing CJK glyphs"
+                );
+            }
+        });
+    }
+
+    /// Guard the whole vocabulary of both GUI sources, not only the sample
+    /// string above. This is how the seven Ark Pixel gaps were found.
+    #[test]
+    fn embedded_fonts_cover_every_cjk_character_in_the_gui_sources() {
+        let mut cjk = String::new();
+        for source in [include_str!("ui.rs"), include_str!("main.rs")] {
+            for character in source.chars() {
+                let code = character as u32;
+                if (0x3000..=0x303f).contains(&code)
+                    || (0x3400..=0x9fff).contains(&code)
+                    || (0xff00..=0xffef).contains(&code)
+                {
+                    cjk.push(character);
+                }
+            }
+        }
+        let ctx = pixel_test_context();
+        ctx.fonts(|fonts| {
+            for family in [
+                pixel_family(),
+                bold_family(),
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+            ] {
+                let font = FontId::new(10.0, family.clone());
+                let missing: String = cjk
+                    .chars()
+                    .filter(|character| !fonts.has_glyph(&font, *character))
+                    .collect();
+                assert!(
+                    missing.is_empty(),
+                    "font family {family:?} is missing CJK glyphs: {missing:?}"
                 );
             }
         });
