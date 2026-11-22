@@ -45,6 +45,11 @@ try {
     Copy-Item (Join-Path $Root "LICENSE") $stage
     Copy-Item (Join-Path $Root "CHANGELOG.md") $stage
     Copy-Item (Join-Path $Root "NOTICE") $stage
+    Copy-Item (Join-Path $Root "SECURITY.md") $stage
+    Copy-Item (Join-Path $Root "CONTRIBUTING.md") $stage
+    $docsScreenshots = Join-Path $stage "docs/screenshots"
+    New-Item -ItemType Directory -Force -Path $docsScreenshots | Out-Null
+    Copy-Item -Recurse (Join-Path $Root "docs/screenshots/pixel-ui") $docsScreenshots
     Copy-Item -Recurse $runtime (Join-Path $stage "runtime/$Target")
 
     $zip = Join-Path $Root "dist/ocr-tool-$Version-$Target.zip"
