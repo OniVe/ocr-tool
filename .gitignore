@@ -14,6 +14,13 @@
 /samples/*
 !/samples/SOURCES.md
 
+# Local internal notes and scratch artifacts (never published)
+/audit-*/
+/handoff-*.md
+/decisions-*.md
+/reports/
+/docs/planning/
+
 # Editor / OS noise
 .idea/
 .vscode/

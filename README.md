@@ -1,5 +1,11 @@
 # ocr-tool
 
+[![CI](https://github.com/onive/ocr-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/onive/ocr-tool/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/onive/ocr-tool?label=release)](https://github.com/onive/ocr-tool/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**English** · [Русский](README.ru.md)
+
 Local OCR for PDF and images (PNG/JPEG/TIFF/WebP/BMP), optimized for Russian
 documents. The app renders pages with PDFium, sends each page to
 [Chandra OCR 2](https://github.com/datalab-to/chandra) served by a local
@@ -9,6 +15,11 @@ layout JSON.
 There is a CLI (`ocr-tool`) and a desktop GUI (`ocr-tool-gui`). Everything runs
 offline after the runtime and model are downloaded.
 
+![ocr-tool GUI](docs/screenshots/pixel-ui/02-ready.png)
+
+More screens: [docs/screenshots/pixel-ui](docs/screenshots/pixel-ui/) (setup,
+running, result, error, advanced settings, help and the 1000×720 minimum).
+
 > **Not a single executable.** A working installation is:
 > `ocr-tool` binary + PDFium library + `llama-server` binary + 3.4 GB model files.
 > Model weights are never bundled; this is not a hosted service and no network
@@ -16,11 +27,12 @@ offline after the runtime and model are downloaded.
 
 ## Status
 
-Locally built and tested on **Windows 11 x64**, Rust 1.99 MSVC, NVIDIA RTX 3060
-12 GB (Vulkan build), llama.cpp **b12535**, PDFium **chromium/8165**, Chandra
-OCR 2 **Q4_K_M** + **mmproj Q8_0**. Linux and macOS builds are wired into
-`.github/workflows/release.yml`, but were **not executed locally** for this
-snapshot (see Limitations).
+Version **0.1.0**. Locally built and tested on **Windows 11 x64**, Rust 1.99
+MSVC, NVIDIA RTX 3060 12 GB (Vulkan build), llama.cpp **b12535**, PDFium
+**chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. The **200**
+workspace tests pass on Windows; Linux and macOS are covered by the CI matrix
+(`.github/workflows/ci.yml`) rather than local hardware. Release archives are
+**not code-signed** (no Authenticode, notarization or installer).
 
 | Component | Pinned version |
 |---|---|
@@ -31,26 +43,46 @@ snapshot (see Limitations).
 
 ## Quick start (Windows)
 
-Build (or unpack the release package) and start the GUI; no CLI is needed:
+1. Download `ocr-tool-0.1.0-windows-x64.zip` from
+   [Releases](https://github.com/onive/ocr-tool/releases).
+2. Unpack it anywhere — there is no installer and no admin rights are needed.
+3. Run `ocr-tool-gui.exe`.
+
+On first launch the GUI downloads the pinned model (~3.4 GB). The release
+archive already contains `runtime/`; the GUI downloads the engine only if it is
+missing — for example after a source build or if the folder was deleted
+(~70 MB: `llama-server` + PDFium). Recognition then runs locally, with no CLI
+and no further network access.
+
+Build from source instead:
 
 ```powershell
+git clone https://github.com/onive/ocr-tool.git
+cd ocr-tool
 cargo build --release
 .\target\release\ocr-tool-gui.exe
 ```
 
-On the first run the GUI shows two independent setup panels:
+The public repository **does not contain test documents**. `samples/SOURCES.md`
+records only the provenance of the local fixtures used during development; the
+files themselves contain personal data and are never published. Use your own
+file, for example `C:\docs\document.pdf` (Windows) or `path/to/document.pdf`
+(Linux/macOS).
 
-1. **Download model (~3.4 GB)** — the pinned Chandra Q4_K_M + mmproj pair,
-   resumable and SHA-256 verified, into the app-data model folder (or the
-   editable Model dir).
-2. **Download runtime (~70 MB)** — llama-vulkan, llama-cpu and PDFium into the
-   editable **Runtime folder** (defaults to
+On the first run the GUI shows one **ПОДГОТОВКА** panel with two independent
+rows:
+
+1. **СКАЧАТЬ МОДЕЛЬ (~3,4 ГБ)** — the pinned Chandra Q4_K_M + mmproj pair,
+   resumable and SHA-256 verified, into the app-data model folder (or a folder
+   chosen with **ПАПКА МОДЕЛИ**).
+2. **СКАЧАТЬ ДВИЖОК (~70 МБ)** — llama-vulkan, llama-cpu and PDFium into the
+   editable engine folder (defaults to
    `%LOCALAPPDATA%\ocr-tool\runtime\windows-x64`). The sizes are per platform
    (~25 MB on macOS).
 
-Both downloads have progress and cancel; Recognize stays disabled while either
-is running. To keep everything in one place, set both the Model dir and the
-Runtime folder.
+Both downloads have progress and cancel; **РАСПОЗНАТЬ** stays disabled while
+either is running. To keep everything in one place, choose both folders under
+the same parent with **ПАПКА МОДЕЛИ** / **ПАПКА ДВИЖКА**.
 
 On Windows the release GUI is linked as a Windows-subsystem executable:
 double-clicking `ocr-tool-gui.exe` opens only the GUI window, with no separate
@@ -62,12 +94,15 @@ remains a console program. Model/runtime downloads run on background threads,
 and `llama-server` is a separate, console-hidden sidecar managed by the GUI
 (in-process inference is out of scope).
 
-Both Windows executables carry the same app icon (`assets/ocr-tool.ico`), so
-Explorer, the taskbar and Alt-Tab show it; the GUI window icon is loaded from
-`assets/icon-256.png`. The editable vector source is `assets/ocr-tool.svg`
-(1024×1024, accent-blue tile, document and turquoise scan line). The PNG is
-also used for window icons on Linux/macOS; a macOS `.icns` can be generated in
-CI from the same source.
+Both Windows executables carry the same pixel-art app icon
+(`assets/ocr-tool.ico`, sizes 16–256), so Explorer, the taskbar and Alt-Tab show
+it; the GUI window icon is loaded from `assets/icon-256.png`. The artwork is
+cream `#F2EFE7` and ink `#111111`: a document with a scan line. The editable SVG
+source is `assets/ocr-tool.svg`; regenerate the ICO/PNG set with
+`bun scripts/gen-icon.ts`. Preview:
+[docs/screenshots/pixel-ui/icon-preview.png](docs/screenshots/pixel-ui/icon-preview.png).
+The PNG is also used for window icons on Linux/macOS; a macOS `.icns` can be
+generated in CI from the same source.
 
 CLI parity (for robots/scripts):
 
@@ -75,18 +110,17 @@ CLI parity (for robots/scripts):
 cargo run --release -p ocr-cli -- runtime download
 cargo run --release -p ocr-cli -- models download
 cargo run --release -p ocr-cli -- doctor
-cargo run --release -p ocr-cli -- ocr samples\invoice_scan_ru.jpg -o out
-cargo run --release -p ocr-cli -- ocr samples\contract_ru.pdf -o out --pages 1-2
+cargo run --release -p ocr-cli -- ocr C:\docs\document.pdf -o out
+cargo run --release -p ocr-cli -- ocr C:\docs\contract.pdf -o out --pages 1-2
 ```
 
-The GUI is self-sufficient: if the model is missing it offers **Download model
-(~3.4 GB)** with progress and cancel, **Choose existing model folder…**, and
-**Open model folder**; if the runtime is missing it offers the Runtime folder
-field plus **Download runtime (~70 MB)**. Both downloads are resumable and
-recognise an already present installation, so nothing is fetched twice. When
-model files exist but have the wrong size, **Replace / Re-download…** (with a
+The GUI is self-sufficient: if the model is missing it offers **СКАЧАТЬ МОДЕЛЬ
+(~3,4 ГБ)** with progress and cancel plus **ПАПКА МОДЕЛИ**; if the engine is
+missing it offers the engine folder plus **СКАЧАТЬ ДВИЖОК**. Both downloads are
+resumable and recognise an already present installation, so nothing is fetched
+twice. When model files exist but have the wrong size, **ЗАМЕНИТЬ** (with a
 confirmation step) deletes them and fetches the pinned pair again; a ready
-runtime gets **Re-download runtime** under Advanced paths.
+runtime gets **ПЕРЕУСТАНОВИТЬ**.
 
 Linux/macOS:
 
@@ -101,18 +135,18 @@ cargo run --release -p ocr-cli -- ocr document.pdf -o out
 If you already unpacked runtime and model elsewhere, point the app at them:
 
 ```powershell
-$env:OCR_LLAMA_SERVER = "E:\llama\llama-server.exe"
-$env:OCR_MODEL_DIR    = "E:\models\chandra-ocr-2"
-$env:OCR_PDFIUM       = "E:\pdfium\pdfium.dll"
+$env:OCR_LLAMA_SERVER = "C:\tools\llama\llama-server.exe"
+$env:OCR_MODEL_DIR    = "C:\models\chandra-ocr-2"
+$env:OCR_PDFIUM       = "C:\tools\pdfium\pdfium.dll"
 ```
 
-or use `--llama-dir`, `--model-dir`, `--pdfium` on the CLI / the Model dir,
-llama dir and PDFium fields under “Advanced paths” in the GUI. The **Runtime
-folder** field in the Runtime panel (and the picker under Advanced) fills the
+or use `--llama-dir`, `--model-dir`, `--pdfium` on the CLI / the model dir,
+llama dir and PDFium fields under **ДОПОЛНИТЕЛЬНО** in the GUI. The engine
+folder in the setup panel (and the picker under **ДОПОЛНИТЕЛЬНО**) fills the
 llama directory and the PDFium library from
-`runtime/<os>-<arch>/{llama-*,pdfium}`; the same folder is where **Download
-runtime** installs the pinned archives. Model and runtime folders are
-independent on purpose — set both to keep everything in one place.
+`runtime/<os>-<arch>/{llama-*,pdfium}`; the same folder is where **СКАЧАТЬ
+ДВИЖОК** installs the pinned archives. Model and runtime folders are independent
+on purpose — set both to keep everything in one place.
 
 ## CLI
 
@@ -293,6 +327,15 @@ cargo run --release -p ocr-gui
 The GUI is self-sufficient on the first run; no CLI or environment variable is
 required.
 
+- **Russian pixel-art interface.** Every visible label is Russian (brand and
+  technical names such as `OCR TOOL`, `PDFium`, `DPI`, `HTML/JSON/MD` stay
+  as-is), with cream `#F2EFE7` and ink `#111111` palette and pixel fonts. See
+  the [screenshot gallery](docs/screenshots/pixel-ui/).
+- **Frameless window with its own header.** Native decoration is disabled; the
+  custom pixel header is the title bar. Drag it to move the window, double-click
+  to maximize/restore, resize from any edge, and use the `—` / `□` / `×`
+  controls. Minimum size is **1000×720** (default 1180×840); the window stays
+  resizable, keeps its icon and appears on the taskbar.
 - **No console window** — the release binary uses the Windows GUI subsystem, so
   starting it from Explorer creates only the app window. Diagnostics are written
   to `%LOCALAPPDATA%\ocr-tool\logs\gui.log` (Linux/macOS:
@@ -302,47 +345,61 @@ required.
   model directory is resolved and the two GGUF sizes are compared with the
   pinned download; PDFium is located and `llama-server` candidates are
   enumerated.
-- **Model missing or incomplete** — a setup panel says “Model not found in
-  <path>” or “Model files incomplete in <path>” and offers **Download model
-  (~3.4 GB)** (background thread, per-file bytes/percent, already-present files
-  skipped, cancel keeps the `.part` file for resume), **Choose existing model
-  folder…** (rechecked immediately), **Open model folder**, and **Replace /
-  Re-download…**. Replace asks for confirmation, deletes the existing model
-  files and their `.part` remainders, and downloads the pinned pair again; it is
-  the GUI exit from the “incomplete / wrong size” state that a plain download
-  deliberately refuses to overwrite.
-- **Runtime missing** — a “Runtime not found” panel shows the editable **Runtime
-  folder** (placeholder: the platform default), **Choose folder…**, **Open
-  folder**, and **Download runtime (~70 MB; ~25 MB on macOS)**. The download
-  fetches llama-vulkan, llama-cpu and PDFium for the current platform, verifies
-  their pinned SHA-256, and installs them into the chosen folder; progress,
-  per-component status and cancel are shown, and a partial `.part` archive
-  resumes. On success the folder fills llama dir (`llama-vulkan` / `llama-cpu`)
-  and PDFium (`pdfium/bin|lib/<lib>`) and the status says
-  “Runtime ready … (downloaded to <path>)”. In the release package the
-  `runtime` folder next to the executable is still discovered automatically. A
-  missing runtime never appears as a raw `os error 3` in the main status.
-- **Independent downloads** — model and runtime each have their own button and
-  cancel; while either runs, Recognize and the other download button are
-  disabled. **Re-download runtime** (with confirmation) lives under Advanced
-  paths once the runtime is ready.
-- **PDFium source** — “Runtime ready” names where the library came from: the
+- **Model missing or incomplete** — the **ПОДГОТОВКА** panel marks the model
+  `НЕТ` or `НЕПОЛНАЯ` and offers **СКАЧАТЬ МОДЕЛЬ (~3,4 ГБ)** (background
+  thread, per-file bytes/percent, already-present files skipped, cancel keeps
+  the `.part` file for resume), **ПАПКА МОДЕЛИ** (a folder picker, rechecked
+  immediately), and **ЗАМЕНИТЬ**. Replace asks for confirmation, deletes the
+  existing model files and their `.part` remainders, and downloads the pinned
+  pair again; it is the GUI exit from the incomplete/wrong-size state that a
+  plain download deliberately refuses to overwrite.
+- **Runtime missing** — the same panel shows the editable engine folder
+  (placeholder: the platform default), **ПАПКА ДВИЖКА**, and **СКАЧАТЬ ДВИЖОК**
+  (~70 MB; ~25 MB on macOS). The download fetches llama-vulkan, llama-cpu and
+  PDFium for the current platform, verifies their pinned SHA-256, and installs
+  them into the chosen folder; progress, per-component status and cancel are
+  shown, and a partial `.part` archive resumes. On success the folder fills
+  llama dir (`llama-vulkan` / `llama-cpu`) and PDFium
+  (`pdfium/bin|lib/<lib>`) and the status says the engine is ready. In the
+  release package the `runtime` folder next to the executable is still
+  discovered automatically. A missing runtime never appears as a raw
+  `os error 3` in the main status.
+- **Independent downloads** — model and engine each have their own button and
+  cancel; while either runs, **РАСПОЗНАТЬ** and the other download button are
+  disabled. **ПЕРЕУСТАНОВИТЬ** (with confirmation) lives in the engine row once
+  the runtime is ready.
+- **PDFium source** — the ready status names where the library came from: the
   chosen runtime folder/path, `OCR_PDFIUM`, or auto-discovery next to the app.
   A visible warning is shown when `OCR_PDFIUM` overrides the bundled runtime.
-- **Advanced paths** opens automatically while setup is incomplete (model,
-  llama-server or PDFium missing) and keeps optional Model dir / llama dir /
-  PDFium / Runtime folder overrides. The Runtime folder is the same field as in
-  the Runtime panel.
-- Recognition: add files/folder (drag and drop works), output directory,
-  format (Markdown, HTML, JSON, both, all), device, DPI, page range, PDF
-  password (masked field), recurse toggle and **Block extraction** (off /
-  images only / all blocks). A **Speed** card selects **Quality** (4096 image
-  tokens) or **Fast** (2048; ~15% faster, table rows may shift) and the
-  **2 pages at once (PDF; GPU)** option. **Recognize** runs in a background
-  thread with progress, per-page status, log, cancel, and “Open output folder” /
-  “Open HTML” / “Open JSON”. Cancel kills the request and the `llama-server`
-  process tree; closing the window cancels the job and waits for the sidecar to
-  stop.
+- **Advanced paths** (**ДОПОЛНИТЕЛЬНО**) opens automatically while setup is
+  incomplete (model, llama-server or PDFium missing) and keeps optional model
+  dir / llama dir / PDFium / engine folder overrides. The engine folder is the
+  same field as in the setup panel.
+- Recognition: **ДОБАВИТЬ ФАЙЛЫ** (drag and drop works), output folder
+  (**ПАПКА СОХРАНЕНИЯ**), format (`MD`, `HTML`, `JSON`, `ОБА`, `ВСЁ`), device,
+  DPI, page range, PDF password (masked field), recurse toggle and **Block
+  extraction** (off / images only / all blocks). A **СКОРОСТЬ** card selects
+  **КАЧЕСТВО** (4096 image tokens) or **БЫСТРО** (2048; ~15% faster, table rows
+  may shift) and the **2 pages at once (PDF; GPU)** option. **РАСПОЗНАТЬ** runs
+  in a background thread with progress, per-page status, log and cancel.
+- **Result actions** — **ОТКРЫТЬ ПАПКУ**, **ОТКРЫТЬ HTML**, **ОТКРЫТЬ MD** and
+  **ОТКРЫТЬ JSON**; each file button appears only when that file exists, so
+  **ОТКРЫТЬ MD** is absent for an HTML-only or JSON-only job. Cancel kills the
+  request and the `llama-server` process tree; closing the window cancels the
+  job and waits for the sidecar to stop.
+- **Model preload** (`preload_model`, **on by default**) — after setup the GUI
+  starts `llama-server` and keeps the model in memory, so the first document
+  skips engine startup. It reuses the same server across jobs, shows
+  `ЗАГРУЖАЕМ МОДЕЛЬ…` and then `МОДЕЛЬ В ПАМЯТИ`, and reserves roughly **5 GB
+  of VRAM/RAM**. Turn it off with **ПРЕДЗАГРУЗКА МОДЕЛИ** in **СКОРОСТЬ** when
+  memory is needed elsewhere; the setting is remembered. A failed preload is
+  reported but does not block recognition — the next job starts its own engine.
+- **Saved preferences** — output folder, format, device, DPI, block extraction,
+  fast mode, parallel pages, `model_dir`, `runtime_dir`, `llama_dir`, `pdfium`,
+  page range, recurse, `max_pixels`, `max_tokens`, request timeout
+  (`timeout_secs`) and `preload_model` are stored in `gui-prefs.json` in the
+  app-data folder. Passwords, document names and document contents are never
+  saved.
 - **Approximate ETA from the start.** Before the first page finishes the GUI
   shows a deliberately rough estimate: ~12 min per selected page plus ~20 s of
   startup for CPU (Fast: ~10 min per page); ~30 s per page plus ~10 s of startup
@@ -423,12 +480,14 @@ bundled runtime.
 ## Build, test, package
 
 ```bash
-cargo test --workspace
+cargo fmt --all -- --check
+cargo test --workspace   # 200 tests
 cargo build --release
 ```
 
 Binaries: `target/release/ocr-tool` and `target/release/ocr-tool-gui`
-(`.exe` on Windows).
+(`.exe` on Windows). Prerequisites and platform dependencies are listed in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Packaging (model not included):
 
@@ -442,11 +501,12 @@ Packaging (model not included):
 
 `scripts/fetch-runtime.ps1|.sh` download the pinned llama.cpp and PDFium archives
 into `runtime/<target>/` for packaging; GUI and CLI users do not need them
-(`Download runtime` / `runtime download` install the same layout).
-`scripts/package.ps1|.sh` copy the executables, `runtime/<target>`, README and
-NOTICE into `dist/`. The GitHub Actions workflow builds and uploads artifacts for
-Windows, Ubuntu and macOS; it does not publish a release. Code
-signing/notarization is not configured.
+(**СКАЧАТЬ ДВИЖОК** / `runtime download` install the same layout).
+`scripts/package.ps1|.sh` copy the executables, `runtime/<target>`,
+`README.md`/`README.ru.md`, `LICENSE`, `CHANGELOG.md` and `NOTICE` into `dist/`.
+GitHub Actions runs the test/build matrix on Windows,
+Ubuntu and macOS and produces the release archives; code signing/notarization
+is not configured, so Windows SmartScreen may warn on first launch.
 
 `scripts/acceptance.ps1` is the local acceptance test used during development.
 It expects `.tmp/models`, `.tmp/llama`, `.tmp/llama-cpu` and `.tmp/pdfium` and
@@ -503,24 +563,37 @@ typical laptops.
 - `--parallel-pages 2` overlaps requests, not PDF rendering, and needs roughly
   5 GB of VRAM. It does not make a single page faster and may not help on CPU.
   Images (non-PDF inputs) are still processed one at a time.
-- Linux/macOS were not exercised on hardware in this snapshot; only Windows was
-  verified locally. CI files are provided but were not run.
+- Linux/macOS are exercised by the CI matrix, not on local hardware in this
+  snapshot; only Windows 11 x64 was verified locally.
 - The GUI and CLI download both the model and the runtime (llama-server +
   PDFium) themselves; the release package also ships `runtime/` next to the
   executable. Nothing is installed by a hidden script.
 - The model is licensed OpenRAIL-M; commercial use is not promised. See NOTICE.
-- `samples/` contains personal data and is gitignored except `SOURCES.md`.
+- The public repository contains no OCR test documents. `samples/SOURCES.md`
+  documents only the provenance of local fixtures; the files contain personal
+  data and are never published (the whole folder except `SOURCES.md` is
+  gitignored).
 
 ## Privacy
 
 All recognition is local. The only network operations are explicit model
-downloads (the GUI **Download model** button or `models download`, both to
-Hugging Face) and explicit runtime downloads (the GUI **Download runtime**
+downloads (the GUI **СКАЧАТЬ МОДЕЛЬ** button or `models download`, both to
+Hugging Face) and explicit runtime downloads (the GUI **СКАЧАТЬ ДВИЖОК**
 button or `runtime download`, both to GitHub), plus the packaging
 `fetch-runtime` scripts. No telemetry. Output files can contain sensitive text;
 protect them accordingly.
 
+## Development and support
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — prerequisites, checks, PR rules.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability privately.
+- [CHANGELOG.md](CHANGELOG.md) — release history; see also
+  [Releases](https://github.com/onive/ocr-tool/releases).
+
 ## License
 
-The Rust code in this repository is MIT. Bundled/downloaded components keep their
-own licenses; see [NOTICE](NOTICE).
+The Rust code in this repository is **MIT** (see [LICENSE](LICENSE)). Bundled
+fonts are under the SIL Open Font License (see `assets/fonts/OFL*.txt`). The
+Chandra OCR 2 model weights are **OpenRAIL-M**, and llama.cpp/PDFium keep their
+own licenses; downloaded components are not part of this repository's source
+license. See [NOTICE](NOTICE) for details.
