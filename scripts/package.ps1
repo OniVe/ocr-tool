@@ -53,6 +53,15 @@ try {
     $samplesStage = Join-Path $stage "samples"
     New-Item -ItemType Directory -Force -Path $samplesStage | Out-Null
     Copy-Item (Join-Path $Root "samples/SOURCES.md") $samplesStage
+    $thirdPartyStage = Join-Path $stage "third-party"
+    New-Item -ItemType Directory -Force -Path $thirdPartyStage | Out-Null
+    Copy-Item (Join-Path $Root "third-party/llama.cpp-LICENSE") $thirdPartyStage
+    Copy-Item (Join-Path $Root "third-party/README.md") $thirdPartyStage
+    $fontsStage = Join-Path $stage "assets/fonts"
+    New-Item -ItemType Directory -Force -Path $fontsStage | Out-Null
+    Copy-Item (Join-Path $Root "assets/fonts/OFL.txt") $fontsStage
+    Copy-Item (Join-Path $Root "assets/fonts/OFL-IBMPlexMono.txt") $fontsStage
+    Copy-Item (Join-Path $Root "assets/fonts/README.md") $fontsStage
     Copy-Item -Recurse $runtime (Join-Path $stage "runtime/$Target")
 
     $zip = Join-Path $Root "dist/ocr-tool-$Version-$Target.zip"
