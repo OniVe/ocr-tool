@@ -112,7 +112,7 @@ everything runs offline.
 
 Version **0.1.0**. Locally built and tested on **Windows 11 x64**, Rust 1.99
 MSVC, NVIDIA RTX 3060 12 GB (Vulkan build), llama.cpp **b12535**, PDFium
-**chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. The **200**
+**chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. The **215**
 workspace tests pass on Windows; Linux and macOS are covered by the CI matrix
 (`.github/workflows/ci.yml`) rather than local hardware. Release archives are
 **not code-signed** (no Authenticode, notarization or installer).
@@ -690,7 +690,7 @@ wall yet — every PR is listed in the repository history.
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace   # 200 tests
+cargo test --workspace   # 215 tests
 cargo build --release
 ```
 

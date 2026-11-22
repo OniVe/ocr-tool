@@ -31,7 +31,7 @@ First public release.
   1000×720 minimum window size.
 - Pixel-art application icons (cream `#F2EFE7` / ink `#111111`) for Windows
   executables, the GUI window and documentation.
-- 200 workspace tests.
+- 215 workspace tests.
 
 ### Notes
 

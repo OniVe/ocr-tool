@@ -3763,12 +3763,6 @@ pub(crate) fn progress_text_lang(
     text
 }
 
-/// Russian progress sentence kept for `main.rs`. The GUI uses
-/// [`progress_text_lang`] with `app.lang`.
-pub(crate) fn progress_text(done: u64, total: u64, started: Option<Instant>) -> String {
-    progress_text_lang(Lang::Ru, done, total, started)
-}
-
 /// Opening helpers keep every filesystem/dialog call out of the drawing code.
 impl OcrApp {
     pub(crate) fn pick_files(&mut self) {
@@ -4167,6 +4161,17 @@ mod tests {
     }
 
     #[test]
+    fn device_labels_are_localized() {
+        assert_eq!(
+            device_label(Lang::En, Device::Auto),
+            "Auto (GPU, otherwise CPU)"
+        );
+        assert_eq!(device_label(Lang::En, Device::Cpu), "CPU (slower)");
+        assert_eq!(device_label(Lang::Zh, Device::Cpu), "CPU（较慢）");
+        assert_eq!(device_label(Lang::Ru, Device::Gpu), "GPU (видеокарта)");
+    }
+
+    #[test]
     fn extraction_modes_have_human_labels() {
         assert_eq!(
             extract_blocks_label(Lang::Ru, BlockExtraction::None),
@@ -4242,7 +4247,7 @@ mod tests {
             progress_text_lang(Lang::En, 512, 0, None),
             "Downloaded 512 B"
         );
-        assert_eq!(progress_text(512, 0, None), "Скачано 512 Б");
+        assert_eq!(progress_text_lang(Lang::Ru, 512, 0, None), "Скачано 512 Б");
     }
 
     fn has_cyrillic(text: &str) -> bool {
