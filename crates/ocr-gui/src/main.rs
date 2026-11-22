@@ -1470,7 +1470,12 @@ impl OcrApp {
         };
         self.runtime_text = format!(
             "{label} • {}{suffix}",
-            ui::progress_text(progress.downloaded, progress.total, self.runtime_started)
+            ui::progress_text_lang(
+                self.lang,
+                progress.downloaded,
+                progress.total,
+                self.runtime_started,
+            )
         );
         self.status = if progress.done {
             fill(trf(self.lang, "{}: готово."), &[&label])
@@ -1503,7 +1508,8 @@ impl OcrApp {
         };
         self.progress = fraction;
         let percent = (fraction * 100.0).round() as u32;
-        let mut text = ui::progress_text(progress.downloaded, total, self.download_started);
+        let mut text =
+            ui::progress_text_lang(self.lang, progress.downloaded, total, self.download_started);
         if self.download_file_total > 1 {
             text = fill(
                 trf(self.lang, "Файл {} из {} • {}"),
