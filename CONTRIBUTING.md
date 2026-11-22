@@ -32,7 +32,7 @@ cargo test --workspace
 cargo build --release
 ```
 
-`cargo test --workspace` is the expected baseline (currently 215 tests). If your
+`cargo test --workspace` is the expected baseline (currently 216 tests). If your
 change affects the GUI, include a screenshot or a short description of the
 visible result. Do not run the GUI or OCR in CI just to prove a docs change.
 

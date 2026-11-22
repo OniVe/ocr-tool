@@ -111,7 +111,7 @@
 
 Версия **0.1.0**. Локально собрано и проверено на **Windows 11 x64**, Rust 1.99
 MSVC, NVIDIA RTX 3060 12 ГБ (сборка Vulkan), llama.cpp **b12535**, PDFium
-**chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. **215** тестов
+**chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. **216** тестов
 workspace проходят на Windows; Linux и macOS проверяются в CI-матрице
 (`.github/workflows/ci.yml`), а не на локальном железе. Релизные архивы **без
 подписи кода** (нет Authenticode, notarization и установщика).
@@ -685,7 +685,7 @@ runtime (кнопка GUI **СКАЧАТЬ ДВИЖОК** или `runtime downlo
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace   # 215 тестов
+cargo test --workspace   # 216 тестов
 cargo build --release
 ```
 
