@@ -24,6 +24,7 @@ open = "5"
 serde.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
+sys-locale = "0.3"
 image.workspace = true
 ocr-core = { path = "../ocr-core" }
 ocr-app = { path = "../ocr-app" }

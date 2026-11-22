@@ -26,6 +26,10 @@ pub struct GuiPrefs {
     pub device: Option<String>,
     #[serde(default)]
     pub dpi: Option<u32>,
+    /// Interface language code (`en`/`ru`/`zh`); missing means automatic
+    /// detection from the OS locale.
+    #[serde(default)]
+    pub lang: Option<String>,
     /// `none`/`images`/`all`; the newer field.
     #[serde(default)]
     pub extract_blocks: Option<String>,
@@ -86,6 +90,7 @@ impl Default for GuiPrefs {
             format: None,
             device: None,
             dpi: None,
+            lang: None,
             extract_blocks: None,
             extract_images: None,
             fast: None,
@@ -248,6 +253,7 @@ mod tests {
             format: Some("all".to_string()),
             device: Some("cpu".to_string()),
             dpi: Some(240),
+            lang: Some("ru".to_string()),
             extract_blocks: Some("all".to_string()),
             extract_images: Some(false),
             fast: Some(true),
@@ -297,6 +303,10 @@ mod tests {
         assert_eq!(prefs.max_pixels, 0);
         assert_eq!(prefs.max_tokens, 0);
         assert_eq!(prefs.timeout_secs, 0);
+        assert_eq!(
+            prefs.lang, None,
+            "an older prefs file without the field means automatic detection"
+        );
         assert!(
             prefs.preload_model,
             "an older prefs file without the field must preload the model"
@@ -304,6 +314,27 @@ mod tests {
         assert_eq!(prefs.max_pixels_or(400_000_000), 400_000_000);
         assert_eq!(prefs.max_tokens_or(4096), 4096);
         assert_eq!(prefs.timeout_secs_or(600), 600);
+    }
+
+    #[test]
+    fn language_preference_roundtrips_and_is_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui-prefs.json");
+        for code in ["en", "ru", "zh"] {
+            let prefs = GuiPrefs {
+                lang: Some(code.to_string()),
+                ..GuiPrefs::default()
+            };
+            save_to(&path, &prefs).unwrap();
+            assert_eq!(load_from(&path).lang.as_deref(), Some(code));
+        }
+
+        std::fs::write(&path, r#"{"format":"all"}"#).unwrap();
+        assert_eq!(
+            load_from(&path).lang,
+            None,
+            "a prefs file without the field must keep automatic detection"
+        );
     }
 
     #[test]

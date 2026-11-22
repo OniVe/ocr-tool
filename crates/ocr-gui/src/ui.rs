@@ -3028,6 +3028,7 @@ impl OcrApp {
             format: Some(self.format.as_str().to_string()),
             device: Some(self.device.as_str().to_string()),
             dpi: Some(self.dpi),
+            lang: None,
             extract_blocks: Some(self.extract_blocks.as_str().to_string()),
             extract_images: Some(self.extract_blocks == BlockExtraction::Images),
             fast: Some(self.image_max_tokens < DEFAULT_IMAGE_MAX_TOKENS),

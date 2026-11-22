@@ -7,8 +7,11 @@
 
 mod demo;
 mod gui_log;
+mod i18n;
 mod prefs;
 mod ui;
+
+pub(crate) use i18n::Lang;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -273,6 +276,8 @@ struct OcrApp {
     /// Keep llama-server loaded between jobs (preferences toggle, default on).
     preload_model: bool,
     timeout_secs: u64,
+    /// Interface language: environment override, saved choice or OS locale.
+    lang: Lang,
 
     running: bool,
     cancelling: bool,
@@ -286,6 +291,8 @@ struct OcrApp {
     last_error: Option<String>,
     last_error_kind: FailureKind,
     download_notice: bool,
+    /// Language whose window title was already sent to the viewport.
+    last_title_lang: Option<Lang>,
 
     /// A sidecar kept alive between jobs. `None` means the next job starts its
     /// own engine (CLI behaviour and the fallback after a preload failure).
@@ -358,6 +365,13 @@ impl OcrApp {
 
     fn new() -> Self {
         let prefs = prefs::load();
+        // Priority: explicit environment override, the remembered choice, then
+        // the operating-system locale.
+        let lang = std::env::var("OCR_GUI_LANG")
+            .ok()
+            .and_then(|code| Lang::from_code(&code))
+            .or_else(|| prefs.lang.as_deref().and_then(Lang::from_code))
+            .unwrap_or_else(Lang::detect);
         let demo = demo::Demo::from_env();
         let run_demo = demo.run;
         let demo_state = demo.state.clone();
@@ -420,6 +434,7 @@ impl OcrApp {
             parallel_pages,
             preload_model,
             timeout_secs,
+            lang,
 
             running: false,
             cancelling: false,
@@ -433,6 +448,7 @@ impl OcrApp {
             last_error: None,
             last_error_kind: FailureKind::Unknown,
             download_notice: false,
+            last_title_lang: None,
 
             preloaded: None,
             preloading: false,
@@ -503,6 +519,21 @@ impl OcrApp {
             app.start();
         }
         app
+    }
+
+    /// Switch the interface language.
+    ///
+    /// Language-independent state is kept; only the transient error/status
+    /// text is cleared, because it belongs to the previous language. A later
+    /// UI pass fills the neutral status line and persists the choice.
+    pub(crate) fn set_language(&mut self, lang: Lang) {
+        if self.lang == lang {
+            return;
+        }
+        self.lang = lang;
+        self.last_error = None;
+        self.last_error_kind = FailureKind::Unknown;
+        self.status.clear();
     }
 
     /// Screenshot-only visual states. These do not start a job thread, open a
@@ -1625,6 +1656,10 @@ impl OcrApp {
 
 impl eframe::App for OcrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.last_title_lang != Some(self.lang) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.lang.title().to_string()));
+            self.last_title_lang = Some(self.lang);
+        }
         self.poll();
         self.poll_preload();
         self.maybe_refresh_setup();
@@ -1998,6 +2033,25 @@ mod tests {
         app.download_notice = false;
         app.inputs.clear();
         assert_eq!(app.status_phase(), StatusPhase::Empty);
+    }
+
+    #[test]
+    fn language_switch_ignores_the_same_language_and_clears_transient_text() {
+        let mut app = OcrApp::new();
+        app.status = "старый статус".to_string();
+        app.last_error = Some("старая ошибка".to_string());
+        app.last_error_kind = FailureKind::File;
+
+        let current = app.lang;
+        app.set_language(current);
+        assert_eq!(app.status, "старый статус");
+        assert!(app.last_error.is_some());
+
+        app.set_language(current.next());
+        assert_eq!(app.lang, current.next());
+        assert!(app.status.is_empty());
+        assert_eq!(app.last_error, None);
+        assert_eq!(app.last_error_kind, FailureKind::Unknown);
     }
 
     #[test]
