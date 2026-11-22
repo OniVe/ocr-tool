@@ -63,6 +63,25 @@ download() {
   fi
 }
 
+# llama.cpp release tarballs may nest everything under a top-level directory
+# (e.g. llama-b12535/), so extract into a scratch directory and copy the
+# directory that actually contains llama-server.
+extract_llama() {
+  local archive="$1" destination="$2" temp server
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/ocr-llama.XXXXXX")"
+  tar -xzf "$archive" -C "$temp"
+  server="$(find "$temp" -type f -name llama-server | head -n 1 || true)"
+  if [[ -z "$server" ]]; then
+    echo "llama-server missing in $archive" >&2
+    rm -rf "$temp"
+    exit 1
+  fi
+  mkdir -p "$destination"
+  cp -R "$(dirname "$server")/." "$destination/"
+  chmod +x "$destination/llama-server"
+  rm -rf "$temp"
+}
+
 GPU_ARCHIVE="$CACHE/$(basename "$GPU_URL")"
 CPU_ARCHIVE="$CACHE/$(basename "$CPU_URL")"
 PDFIUM_ARCHIVE="$CACHE/$(basename "$PDFIUM_URL")"
@@ -74,12 +93,12 @@ download "$PDFIUM_URL" "$PDFIUM_ARCHIVE"
 
 mkdir -p "$TARGET_DIR/llama-vulkan" "$TARGET_DIR/llama-cpu" "$TARGET_DIR/pdfium"
 echo "  extracting Vulkan/Metal build"
-tar -xzf "$GPU_ARCHIVE" -C "$TARGET_DIR/llama-vulkan"
+extract_llama "$GPU_ARCHIVE" "$TARGET_DIR/llama-vulkan"
 echo "  extracting CPU build"
 if [[ "$GPU_URL" == "$CPU_URL" ]]; then
   cp -R "$TARGET_DIR/llama-vulkan/." "$TARGET_DIR/llama-cpu/"
 else
-  tar -xzf "$CPU_ARCHIVE" -C "$TARGET_DIR/llama-cpu"
+  extract_llama "$CPU_ARCHIVE" "$TARGET_DIR/llama-cpu"
 fi
 
 for dir in "$TARGET_DIR/llama-vulkan" "$TARGET_DIR/llama-cpu"; do
