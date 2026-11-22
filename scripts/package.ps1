@@ -50,6 +50,9 @@ try {
     $docsScreenshots = Join-Path $stage "docs/screenshots"
     New-Item -ItemType Directory -Force -Path $docsScreenshots | Out-Null
     Copy-Item -Recurse (Join-Path $Root "docs/screenshots/pixel-ui") $docsScreenshots
+    $samplesStage = Join-Path $stage "samples"
+    New-Item -ItemType Directory -Force -Path $samplesStage | Out-Null
+    Copy-Item (Join-Path $Root "samples/SOURCES.md") $samplesStage
     Copy-Item -Recurse $runtime (Join-Path $stage "runtime/$Target")
 
     $zip = Join-Path $Root "dist/ocr-tool-$Version-$Target.zip"

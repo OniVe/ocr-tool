@@ -34,6 +34,8 @@ install -m 755 target/release/ocr-tool-gui "$STAGE/"
 cp README.md README.ru.md LICENSE CHANGELOG.md NOTICE SECURITY.md CONTRIBUTING.md "$STAGE/"
 mkdir -p "$STAGE/docs/screenshots"
 cp -R docs/screenshots/pixel-ui "$STAGE/docs/screenshots/"
+mkdir -p "$STAGE/samples"
+cp samples/SOURCES.md "$STAGE/samples/"
 cp -R "$RUNTIME" "$STAGE/runtime/$TARGET"
 
 ARCHIVE="$DIST/ocr-tool-$VERSION-$TARGET.tar.gz"
