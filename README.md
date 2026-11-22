@@ -101,6 +101,9 @@ everything runs offline.
   between jobs (on by default, ~5 GB of VRAM/RAM).
 - **Russian pixel-art GUI.** Frameless window, custom header, Russian labels and
   a cream/ink palette.
+- **English, Russian and Chinese UI.** The interface language follows the OS
+  locale on first launch and can be switched from the header or the Advanced
+  window; the chosen language is saved.
 - **Saved preferences.** Paths, format, device, DPI, speed options and preload
   are restored on the next launch. Passwords and document contents are never
   saved.

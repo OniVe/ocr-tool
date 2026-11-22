@@ -61,6 +61,7 @@ try {
     New-Item -ItemType Directory -Force -Path $fontsStage | Out-Null
     Copy-Item (Join-Path $Root "assets/fonts/OFL.txt") $fontsStage
     Copy-Item (Join-Path $Root "assets/fonts/OFL-IBMPlexMono.txt") $fontsStage
+    Copy-Item (Join-Path $Root "assets/fonts/OFL-ArkPixel.txt") $fontsStage
     Copy-Item (Join-Path $Root "assets/fonts/README.md") $fontsStage
     Copy-Item -Recurse $runtime (Join-Path $stage "runtime/$Target")
 

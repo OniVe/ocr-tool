@@ -38,7 +38,7 @@ mkdir -p "$STAGE/samples"
 cp samples/SOURCES.md "$STAGE/samples/"
 mkdir -p "$STAGE/third-party" "$STAGE/assets/fonts"
 cp third-party/llama.cpp-LICENSE third-party/README.md "$STAGE/third-party/"
-cp assets/fonts/OFL.txt assets/fonts/OFL-IBMPlexMono.txt assets/fonts/README.md "$STAGE/assets/fonts/"
+cp assets/fonts/OFL.txt assets/fonts/OFL-IBMPlexMono.txt assets/fonts/OFL-ArkPixel.txt assets/fonts/README.md "$STAGE/assets/fonts/"
 cp -R "$RUNTIME" "$STAGE/runtime/$TARGET"
 
 ARCHIVE="$DIST/ocr-tool-$VERSION-$TARGET.tar.gz"

@@ -52,7 +52,18 @@ Notable dependencies: eframe/egui (MIT/Apache-2.0), pdfium-render (MIT/Apache-2.
 ammonia (MIT), htmd (MIT), image (MIT/Apache-2.0), ureq (MIT/Apache-2.0),
 clap (MIT/Apache-2.0), rfd (MIT).
 
-6. Test samples
+6. Ark Pixel Font
+-----------------
+Source: https://github.com/TakWolf/ark-pixel-font
+Bundled file: assets/fonts/ArkPixel-12px-zh_hans.ttf
+Version: 2026.11.10 (12px monospaced, zh_hans)
+License: SIL Open Font License 1.1 (assets/fonts/OFL-ArkPixel.txt)
+Copyright (c) 2021, TakWolf (https://takwolf.com).
+
+The font is embedded into the GUI binary to render Chinese interface text. It
+is used only as a fallback after Press Start 2P and IBM Plex Mono.
+
+7. Test samples
 ---------------
 Files under `samples/` (except SOURCES.md) are public web documents used for
 local testing only; they contain personal data and are excluded from version
