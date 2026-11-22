@@ -1933,6 +1933,13 @@ fn status_text(phase: StatusPhase, detail: &str) -> String {
     }
 }
 
+/// Language-aware bottom-bar sentence. The main writer replaces the body with
+/// real localization; until then it keeps the existing Russian wording.
+pub(crate) fn status_text_lang(lang: Lang, phase: StatusPhase, detail: &str) -> String {
+    let _ = lang; // main-writer заменит на реальную локализацию
+    status_text(phase, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

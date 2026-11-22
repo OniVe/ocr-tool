@@ -19,7 +19,7 @@ use ocr_app::setup::ModelStatus;
 use ocr_core::{BlockExtraction, Device, OutputFormat};
 use ocr_engine::{DEFAULT_IMAGE_MAX_TOKENS, FAST_IMAGE_MAX_TOKENS};
 
-use crate::{gui_log, prefs, status_text, FailureKind, OcrApp, StatusPhase};
+use crate::{gui_log, prefs, status_text_lang, FailureKind, OcrApp, StatusPhase};
 
 // ---------------------------------------------------------------------------
 // Pixel Poetry tokens
@@ -933,7 +933,7 @@ fn footer(app: &mut OcrApp, ctx: &egui::Context) {
                             ));
                             ui.add_space(12.0);
                             let phase = app.status_phase();
-                            let status = status_text(phase, &app.status);
+                            let status = status_text_lang(app.lang, phase, &app.status);
                             let prefix = match phase {
                                 StatusPhase::Error | StatusPhase::Notice => "! ",
                                 _ => "",
