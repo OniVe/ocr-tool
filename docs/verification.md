@@ -7,11 +7,11 @@ platform archives:
 - **GitHub build provenance attestations** — one Sigstore bundle per archive,
   created by `actions/attest-build-provenance@v2` and stored in the repository.
 
-**Current status:** the `v0.1.0` release was built before this pipeline existed
-and ships **neither** `SHA256SUMS` nor attestations. Releases from the next tag
-on include both. Archives are still **unsigned** unless the optional
-Authenticode/Developer ID secrets are configured; see
-[docs/signing.md](signing.md).
+**Current status:** `v0.1.0` was built before the attestation pipeline; its
+`SHA256SUMS` asset was added manually, but it has **no** provenance
+attestations. Releases from the next tag include both. Archives are still
+**unsigned** unless the optional Authenticode/Developer ID secrets are
+configured; see [docs/signing.md](signing.md).
 
 ## 1. Download the archive and `SHA256SUMS`
 
@@ -79,6 +79,10 @@ is corrupted or modified: delete it and download again.
 The checksum alone cannot tell you who produced the archive — `SHA256SUMS`
 could be replaced together with the archive. The attestation binds the archive
 digest to the GitHub Actions workflow run that built it.
+
+This step does not apply to `v0.1.0`: it has no attestations, so only the
+checksum in section 2 can be checked. The command below works from the next
+tag on.
 
 Install the [GitHub CLI](https://cli.github.com/) (the `attestation` command
 appeared in `gh` 2.49) and run, in the folder with the downloaded archive:
