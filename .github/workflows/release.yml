@@ -59,6 +59,65 @@ jobs:
       - name: Release build
         run: cargo build --release
 
+      - name: Sign Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_PFX_BASE64)) {
+            Write-Host "::warning title=Unsigned Windows build::WINDOWS_CERT_PFX_BASE64 is not set; skipping Authenticode signing."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            ./scripts/sign-windows.ps1 -PfxPath $pfx -PfxPassword $env:WINDOWS_CERT_PASSWORD
+          }
+          finally {
+            if (Test-Path $pfx) { Remove-Item -Force $pfx }
+          }
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [[ -z "${MACOS_CERT_P12_BASE64}" ]]; then
+            echo "::warning title=Unsigned macOS build::MACOS_CERT_P12_BASE64 is not set; skipping Developer ID signing."
+            exit 0
+          fi
+          cert_path="$RUNNER_TEMP/codesign.p12"
+          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          echo "$MACOS_CERT_P12_BASE64" | base64 -D > "$cert_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$cert_path" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          rm -f "$cert_path"
+
+      - name: Sign macOS binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          if [[ -z "${MACOS_SIGNING_IDENTITY}" ]]; then
+            echo "::warning title=Unsigned macOS build::MACOS_SIGNING_IDENTITY is not set; skipping codesign."
+            exit 0
+          fi
+          ./scripts/sign-macos.sh
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh

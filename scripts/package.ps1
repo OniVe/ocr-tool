@@ -50,6 +50,7 @@ try {
     $docsScreenshots = Join-Path $stage "docs/screenshots"
     New-Item -ItemType Directory -Force -Path $docsScreenshots | Out-Null
     Copy-Item -Recurse (Join-Path $Root "docs/screenshots/pixel-ui") $docsScreenshots
+    Copy-Item (Join-Path $Root "docs/signing.md") (Join-Path $stage "docs")
     $samplesStage = Join-Path $stage "samples"
     New-Item -ItemType Directory -Force -Path $samplesStage | Out-Null
     Copy-Item (Join-Path $Root "samples/SOURCES.md") $samplesStage

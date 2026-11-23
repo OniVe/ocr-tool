@@ -114,8 +114,11 @@ Version **0.1.0**. Locally built and tested on **Windows 11 x64**, Rust 1.99
 MSVC, NVIDIA RTX 3060 12 GB (Vulkan build), llama.cpp **b12535**, PDFium
 **chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. The **216**
 workspace tests pass on Windows; Linux and macOS are covered by the CI matrix
-(`.github/workflows/ci.yml`) rather than local hardware. Release archives are
-**not code-signed** (no Authenticode, notarization or installer).
+(`.github/workflows/ci.yml`) rather than local hardware. Release signing is
+opt-in: the pipeline supports Windows Authenticode and macOS Developer
+ID/notarization (see [docs/signing.md](docs/signing.md)), but the current
+archives are **unsigned** until the signing secrets are configured. There is no
+installer.
 
 ### Built With
 
@@ -654,7 +657,8 @@ protect them accordingly.
   the pinned runtime.
 - [ ] Release workflow hardening: reproducible pinned downloads and artifact
   retention.
-- [ ] Code signing (Authenticode) and macOS notarization.
+- [x] Optional Authenticode/Developer ID signing pipeline.
+- [ ] Enable signing for public releases (certificates + repository secrets).
 - [ ] Installers (MSI/NSIS on Windows, `.dmg` on macOS).
 - [ ] macOS universal binary.
 - [ ] More interface languages and documentation.
@@ -707,8 +711,9 @@ them (**DOWNLOAD ENGINE** / `runtime download` install the same layout).
 `scripts/package.ps1|.sh` copy the executables, `runtime/<target>`,
 `README.md`/`README.ru.md`, `LICENSE`, `CHANGELOG.md` and `NOTICE` into `dist/`.
 GitHub Actions runs the test/build matrix on Windows, Ubuntu and macOS and
-produces the release archives; code signing/notarization is not configured, so
-Windows SmartScreen may warn on first launch.
+produces the release archives. The signing pipeline is optional
+([docs/signing.md](docs/signing.md)); current assets are unsigned, so Windows
+SmartScreen may warn on first launch.
 
 `scripts/acceptance.ps1` is the local acceptance test used during development.
 It expects `.tmp/models`, `.tmp/llama`, `.tmp/llama-cpu` and `.tmp/pdfium` and

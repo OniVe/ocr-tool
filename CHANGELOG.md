@@ -35,8 +35,12 @@ First public release.
 
 ### Notes
 
-- Windows release archives are not code-signed; Linux/macOS builds are covered
-  by CI. Model weights are not bundled and remain under OpenRAIL-M.
+- The `v0.1.0` release archives are not code-signed; Linux/macOS builds are
+  covered by CI. Model weights are not bundled and remain under OpenRAIL-M.
+- A code-signing pipeline (Windows Authenticode, macOS Developer ID and
+  notarization) is available in `.github/workflows/release.yml` and
+  `docs/signing.md`. It is enabled by repository secrets; the `v0.1.0` assets
+  were built without it and are unsigned.
 
 [Unreleased]: https://github.com/onive/ocr-tool/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/onive/ocr-tool/releases/tag/v0.1.0

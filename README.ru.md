@@ -113,8 +113,10 @@
 MSVC, NVIDIA RTX 3060 12 ГБ (сборка Vulkan), llama.cpp **b12535**, PDFium
 **chromium/8165**, Chandra OCR 2 **Q4_K_M** + **mmproj Q8_0**. **216** тестов
 workspace проходят на Windows; Linux и macOS проверяются в CI-матрице
-(`.github/workflows/ci.yml`), а не на локальном железе. Релизные архивы **без
-подписи кода** (нет Authenticode, notarization и установщика).
+(`.github/workflows/ci.yml`), а не на локальном железе. Подпись релизов
+опциональна: пайплайн поддерживает Windows Authenticode и macOS Developer
+ID/notarization (см. [docs/signing.md](docs/signing.md)), но текущие архивы
+**без подписи**, пока не настроены секреты. Установщика по-прежнему нет.
 
 ### Стек
 
@@ -652,7 +654,8 @@ runtime (кнопка GUI **СКАЧАТЬ ДВИЖОК** или `runtime downlo
   закреплённым runtime.
 - [ ] Укрепление release workflow: воспроизводимые закреплённые загрузки и
   хранение артефактов.
-- [ ] Подпись кода (Authenticode) и notarization для macOS.
+- [x] Опциональный пайплайн подписи Authenticode/Developer ID.
+- [ ] Включить подпись для публичных релизов (сертификаты + секреты репозитория).
 - [ ] Установщики (MSI/NSIS в Windows, `.dmg` в macOS).
 - [ ] Универсальный бинарник для macOS.
 - [ ] Дополнительные языки интерфейса и документация.
@@ -705,8 +708,9 @@ cargo build --release
 `scripts/package.ps1|.sh` складывают exe, `runtime/<target>`,
 `README.md`/`README.ru.md`, `LICENSE`, `CHANGELOG.md` и `NOTICE` в `dist/`.
 GitHub Actions прогоняет тесты и сборку на Windows/Ubuntu/macOS и готовит
-релизные архивы; подписи кода нет, поэтому Windows SmartScreen может
-предупредить при первом запуске.
+релизные архивы. Пайплайн подписи опционален ([docs/signing.md](docs/signing.md));
+текущие assets без подписи, поэтому Windows SmartScreen может предупредить при
+первом запуске.
 
 `scripts/acceptance.ps1` — локальный acceptance-тест, использованный при
 разработке. Он ожидает `.tmp/models`, `.tmp/llama`, `.tmp/llama-cpu` и
