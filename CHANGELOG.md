@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 
-- The release workflow now publishes a `SHA256SUMS` file and GitHub build
-  provenance attestations for every archive (see `docs/verification.md`).
-  Authenticode and Developer ID signing remain opt-in; archives built without
-  the signing secrets are still unsigned.
+- The release workflow now uses the static `.github/release-body.md` as the
+  release notes and appends a SHA256 section automatically. Each archive is
+  published with a `.sha256` sidecar and a combined `SHA256SUMS` file, and
+  GitHub build provenance attestations are published for every archive (see
+  `docs/verification.md`). Authenticode and Developer ID signing remain
+  opt-in; archives built without the signing secrets are still unsigned.
 
 ## [0.1.0] - 2026-11-22
 

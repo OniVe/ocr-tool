@@ -221,8 +221,9 @@ cargo run --release -p ocr-cli -- ocr path/to/document.pdf -o out
 
 ### Проверка релиза
 
-Релизы, собранные текущим workflow, публикуют рядом с архивами `SHA256SUMS` и
-attestation происхождения сборки GitHub. Проверка скачанного файла:
+Релизы, собранные текущим workflow, публикуют рядом с архивами `.sha256`
+sidecar для каждого файла, общий `SHA256SUMS` и attestation происхождения
+сборки GitHub. Проверка скачанного файла:
 
 ```bash
 gh attestation verify ocr-tool-<version>-windows-x64.zip --repo onive/ocr-tool

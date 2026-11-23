@@ -225,8 +225,9 @@ file, for example `C:\docs\document.pdf` (Windows) or `path/to/document.pdf`
 
 ### Release verification
 
-Releases built by the current workflow publish `SHA256SUMS` and a GitHub build
-provenance attestation next to each archive. Verify a downloaded file with:
+Releases built by the current workflow publish a `<archive>.sha256` sidecar, a
+combined `SHA256SUMS` and a GitHub build provenance attestation next to each
+archive. Verify a downloaded file with:
 
 ```bash
 gh attestation verify ocr-tool-<version>-windows-x64.zip --repo onive/ocr-tool

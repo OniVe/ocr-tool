@@ -3,23 +3,26 @@
 Every release produced by `.github/workflows/release.yml` publishes, next to the
 platform archives:
 
+- **`<archive>.sha256`** — a sidecar for every archive: one line of the form
+  `<hash>  <filename>`;
 - **`SHA256SUMS`** — SHA-256 checksums of every archive;
 - **GitHub build provenance attestations** — one Sigstore bundle per archive,
   created by `actions/attest-build-provenance@v2` and stored in the repository.
 
 **Current status:** `v0.1.0` was built before the attestation pipeline; its
-`SHA256SUMS` asset was added manually, but it has **no** provenance
-attestations. Releases from the next tag include both. Archives are still
-**unsigned** unless the optional Authenticode/Developer ID secrets are
-configured; see [docs/signing.md](signing.md).
+`SHA256SUMS` and `.sha256` sidecars were added manually, but it has **no**
+provenance attestations. Releases from the next tag include attestations as
+well. Archives are still **unsigned** unless the optional Authenticode/Developer
+ID secrets are configured; see [docs/signing.md](signing.md).
 
-## 1. Download the archive and `SHA256SUMS`
+## 1. Download the archive and checksums
 
 On the [Releases](https://github.com/onive/ocr-tool/releases) page open the
 release and download:
 
 - `ocr-tool-<version>-<target>.zip` (Windows) or `.tar.gz` (Linux/macOS);
-- `SHA256SUMS` from the same release.
+- `<archive>.sha256` (one line) or the combined `SHA256SUMS` from the same
+  release.
 
 ## 2. Check the checksum
 
@@ -51,11 +54,16 @@ sha256sum -c SHA256SUMS
 ```
 
 This expects every archive listed in `SHA256SUMS` to be in the current folder.
-To check a single downloaded archive instead:
+To check a single downloaded archive instead, use its sidecar (one line of the
+form `hash  filename`) or filter the combined file:
 
 ```bash
+sha256sum -c ocr-tool-<version>-windows-x64.zip.sha256
 grep 'windows-x64.zip$' SHA256SUMS | sha256sum -c -
 ```
+
+The sidecar check works from the folder that contains both the archive and the
+`.sha256` file.
 
 ### macOS
 
@@ -68,6 +76,7 @@ shasum -a 256 -c SHA256SUMS
 Single archive:
 
 ```bash
+shasum -a 256 -c ocr-tool-<version>-macos-arm64.tar.gz.sha256
 grep 'macos-arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -
 ```
 
