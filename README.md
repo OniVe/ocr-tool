@@ -223,6 +223,20 @@ files themselves contain personal data and are never published. Use your own
 file, for example `C:\docs\document.pdf` (Windows) or `path/to/document.pdf`
 (Linux/macOS).
 
+### Release verification
+
+Releases built by the current workflow publish `SHA256SUMS` and a GitHub build
+provenance attestation next to each archive. Verify a downloaded file with:
+
+```bash
+gh attestation verify ocr-tool-<version>-windows-x64.zip --repo onive/ocr-tool
+```
+
+Checksum commands for Windows, Linux and macOS, and what provenance does and
+does not prove, are in [docs/verification.md](docs/verification.md).
+Attestations and checksums do not remove SmartScreen/Gatekeeper warnings;
+binaries remain unsigned unless the signing secrets are configured.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- USAGE -->

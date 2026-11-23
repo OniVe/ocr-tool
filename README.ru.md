@@ -219,6 +219,20 @@ cargo run --release -p ocr-cli -- ocr path/to/document.pdf -o out
 персональные данные и не публикуются. Используйте свой файл, например
 `C:\docs\document.pdf` (Windows) или `path/to/document.pdf` (Linux/macOS).
 
+### Проверка релиза
+
+Релизы, собранные текущим workflow, публикуют рядом с архивами `SHA256SUMS` и
+attestation происхождения сборки GitHub. Проверка скачанного файла:
+
+```bash
+gh attestation verify ocr-tool-<version>-windows-x64.zip --repo onive/ocr-tool
+```
+
+Команды проверки контрольных сумм для Windows, Linux и macOS и описание того,
+что именно доказывает provenance, — в [docs/verification.md](docs/verification.md).
+Attestation и суммы не убирают предупреждения SmartScreen/Gatekeeper: без
+настроенных секретов бинарники остаются без подписи.
+
 <p align="right">(<a href="#readme-top">наверх</a>)</p>
 
 <!-- ИСПОЛЬЗОВАНИЕ -->

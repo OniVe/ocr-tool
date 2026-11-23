@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Notes
+
+- The release workflow now publishes a `SHA256SUMS` file and GitHub build
+  provenance attestations for every archive (see `docs/verification.md`).
+  Authenticode and Developer ID signing remain opt-in; archives built without
+  the signing secrets are still unsigned.
+
 ## [0.1.0] - 2026-11-22
 
 First public release.

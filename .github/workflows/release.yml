@@ -28,6 +28,10 @@ jobs:
           - os: macos-15
             target: macos-arm64
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -137,6 +141,13 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.tar.gz
+
   release:
     name: publish
     needs: build
@@ -150,6 +161,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Create SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.zip *.tar.gz > SHA256SUMS
 
       - name: Create GitHub release
         env:
